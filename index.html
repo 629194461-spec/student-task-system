@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#2f80ed" />
+    <title>学习星球</title>
+    <link rel="stylesheet" href="styles.css?v=20260908-ui4" />
+  </head>
+  <body>
+    <section class="login-screen" id="login-screen" aria-label="学习星球登录">
+      <div class="login-illustration" aria-hidden="true">
+        <span class="login-star star-a">★</span><span class="login-star star-b">✦</span><span class="login-star star-c">★</span>
+        <img class="login-planet" src="assets/learning-planet-logo.png" alt="" />
+        <div class="login-copy"><img src="assets/learning-planet-logo.png" alt="学习星球" /><h1>学习星球</h1><p>今天的每一份努力，都会变成一颗闪闪发光的星星。</p></div>
+      </div>
+      <div class="login-panel-wrap">
+        <form class="login-panel" id="login-form">
+          <div class="login-heading"><p class="eyebrow">欢迎回来</p><h2 id="login-title">开始今天的学习吧</h2></div>
+          <div class="login-role-switch" aria-label="选择登录身份">
+            <button type="button" class="login-role active" data-login-role="student">学生登录</button>
+            <button type="button" class="login-role" data-login-role="parent">家长登录</button>
+          </div>
+          <label>用户名<input id="username" name="username" autocomplete="username" required placeholder="请输入用户名" /></label>
+          <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required placeholder="请输入密码" /></label>
+          <div class="captcha-row"><label>验证码<input id="captcha" name="captcha" autocomplete="off" required maxlength="4" placeholder="请输入验证码" /></label><button class="captcha-image" id="refresh-captcha" type="button" title="换一张验证码"><img id="captcha-image" alt="验证码" /></button></div>
+          <p class="login-error" id="login-error" role="alert"></p>
+          <button class="login-submit" type="submit"><span id="login-submit-label">进入我的任务</span> <b>→</b></button>
+        </form>
+      </div>
+    </section>
+
+    <div class="app-shell" id="app-shell" hidden>
+      <header class="topbar">
+        <button class="brand" data-page="today" aria-label="回到首页">
+          <img class="brand-logo" src="assets/learning-planet-logo.png" alt="" /><span>学习星球</span>
+        </button>
+        <div class="role-switch" aria-label="当前使用端">
+          <span class="role active" id="session-role"><i data-lucide="graduation-cap"></i>学生端</span>
+        </div>
+        <div class="top-actions">
+          <button class="avatar-button" aria-label="当前账号的个人资料"><span class="avatar">账</span><span class="avatar-name">当前账号</span></button>
+          <button class="logout-button" id="logout-button" title="退出当前账号">退出登录</button>
+        </div>
+      </header>
+
+      <aside class="sidebar student-sidebar" aria-label="学生端导航">
+        <button class="nav-item active" data-page="today"><i data-lucide="clipboard-check"></i><b>我的任务</b></button>
+        <button class="nav-item" data-page="tasks"><i data-lucide="list-todo"></i><b>任务列表</b></button>
+        <button class="nav-item" data-page="growth"><i data-lucide="sparkles"></i><b>成长星球</b></button>
+      </aside>
+
+      <aside class="sidebar parent-sidebar hidden" aria-label="家长端导航">
+        <p class="sidebar-label">家长空间</p>
+        <button class="nav-item active" data-parent-page="overview"><i data-lucide="layout-dashboard"></i><b>首页概览</b></button>
+        <button class="nav-item admin-only" data-parent-page="parents"><i data-lucide="users-round"></i><b>家长管理</b></button>
+        <button class="nav-item" data-parent-page="students"><i data-lucide="graduation-cap"></i><b>学生管理</b></button>
+        <button class="nav-item" data-parent-page="assign"><i data-lucide="clipboard-plus"></i><b>任务分配</b></button>
+        <button class="nav-item" data-parent-page="categories"><i data-lucide="tags"></i><b>任务分类</b></button>
+        <button class="nav-item" data-parent-page="review"><i data-lucide="badge-check"></i><b>审核中心</b><em>2</em></button>
+        <button class="nav-item" data-parent-page="stats"><i data-lucide="chart-no-axes-combined"></i><b>数据统计</b></button>
+      </aside>
+
+      <main class="main-content">
+        <section class="page student-page active" id="today">
+          <div class="student-hero">
+            <div><p class="eyebrow" id="student-today-date"></p><h1 id="student-greeting">我的任务</h1><p id="student-today-summary"></p></div>
+          </div>
+
+          <div class="week-bar-wrap">
+            <button class="week-arrow" id="student-week-prev" aria-label="上一周"><i data-lucide="chevron-left"></i></button>
+            <div class="week-bar" id="student-week" aria-label="选择日期"></div>
+            <button class="week-arrow" id="student-week-next" aria-label="下一周"><i data-lucide="chevron-right"></i></button>
+          </div>
+
+          <section class="progress-section" aria-label="任务进度">
+            <div class="section-title"><h2><span id="student-list-date-label">今天</span>有 <strong id="task-count">0</strong> 件事</h2><span id="progress-label">0 / 0 件完成</span></div>
+            <div class="progress-track"><span id="progress-bar" style="width:0"></span></div>
+          </section>
+
+          <section class="task-list" id="task-list" aria-label="任务列表"></section>
+        </section>
+
+        <section class="page student-page" id="tasks">
+          <div class="page-heading"><div><p class="eyebrow">我的安排</p><h1>任务列表</h1></div></div>
+          <div class="tabs student-task-tabs"><button class="active" data-student-task-filter="overdue">本周逾期</button><button data-student-task-filter="todo">待办</button><button data-student-task-filter="future">未来</button><button data-student-task-filter="pending_review">待审核</button><button data-student-task-filter="completed">已完成</button></div>
+          <div class="student-task-list" id="student-task-list"></div>
+        </section>
+
+        <section class="page student-page" id="growth">
+          <div class="page-heading"><div><p class="eyebrow">每一次努力都闪闪发光</p><h1>我的成长星球</h1></div></div>
+          <div class="growth-layout">
+            <section class="growth-visual" aria-label="奖励总数">
+              <div class="space-dots">✦　·　✧　·　★</div><img class="growth-mascot" src="assets/growth-star-mascot.png" alt="背着书包、拿着铅笔的星星学习伙伴" /><span class="floating-star a">★</span><span class="floating-star b">✦</span><span class="floating-moon">🌙</span>
+              <div class="reward-numbers"><div><span>⭐</span><strong>0</strong><small>颗星星</small></div><div><span>🌙</span><strong>0</strong><small>个月亮</small></div><div><span>☀️</span><strong>0</strong><small>个太阳</small></div></div>
+            </section>
+            <section class="next-reward"><span class="reward-icon">🌙</span><div><p>离下一个月亮</p><h2>还差 100 颗星星</h2><div class="progress-track"><span style="width:0"></span></div><small>完成任务后会累计成长奖励</small></div></section>
+          </div>
+          <section class="recent-rewards"><div class="section-title"><h2>最近收到的奖励</h2></div><div class="reward-timeline"></div></section>
+        </section>
+
+        <section class="page parent-page" id="overview">
+          <div class="page-heading"><div><p class="eyebrow" id="overview-date"></p><h1 id="overview-greeting">家长首页</h1></div></div>
+          <div class="overview-student-row"><div class="child-switch"><span class="avatar">学</span><div><b>暂无学生</b><small></small></div><label><span>查看学生</span><select id="dashboard-student-select" aria-label="切换学生"></select></label></div><section class="child-growth"><div class="section-title"><h2 id="parent-growth-title">学生成长</h2></div><div class="growth-inline"><div class="growth-rewards" id="parent-growth-rewards"><span class="growth-reward"><i>⭐</i><strong>0</strong></span></div><p id="parent-growth-next">再收集 100 颗星星，得到新月亮</p><div class="progress-track"><span style="width:0"></span></div></div></section></div>
+          <div class="metric-grid">
+            <div class="metric-card week-complete-card"><span><i data-lucide="circle-check-big"></i></span><small>本周完成</small><strong>--</strong><p>本周暂无任务</p></div>
+            <div class="metric-card week-overdue-card"><span><i data-lucide="clock-alert"></i></span><small>本周逾期提醒</small><strong>0</strong><p>本周没有逾期任务</p></div>
+            <button class="metric-card review-card" data-parent-page="review"><span><i data-lucide="clipboard-check"></i></span><small>待审核</small><strong>0</strong><p>所有任务中等待审核的数量</p></button>
+            <div class="metric-card today-complete-card"><span><i data-lucide="calendar-check"></i></span><small>今日完成</small><strong>--</strong><p>今日暂无任务</p></div>
+            <div class="metric-card week-star-card"><span><i data-lucide="star"></i></span><small>本周星星</small><strong>0</strong><p>本周获得的星星数量</p></div>
+          </div>
+          <section class="overview-review-section"><div class="section-title"><h2>待审核任务</h2><button class="text-button" data-parent-page="review">进入审核中心</button></div><div class="review-list" id="compact-review-list"></div></section>
+        </section>
+
+        <section class="page parent-page admin-only" id="parents"><div class="page-heading"><div><p class="eyebrow">平台账号</p><h1>家长管理</h1></div><button class="primary-button" id="add-parent">＋ 新增家长</button></div><div class="parent-account-list" id="parent-account-list"></div></section>
+
+        <section class="page parent-page" id="students"><div class="page-heading"><div><p class="eyebrow">学生管理</p><h1 id="students-page-title">我的孩子</h1></div><button class="primary-button" id="add-student">＋ 新增学生</button></div><div class="student-cards" id="student-cards"></div></section>
+
+        <section class="page parent-page" id="assign">
+          <div class="page-heading"><div><p class="eyebrow">学习安排</p><h1>任务分配</h1></div><button class="primary-button" id="open-assignment">＋ 分配任务</button></div>
+          <div class="task-manager-filter"><label>查看学生<select id="task-student-filter"></select></label><span id="task-list-date-label"></span></div>
+          <div class="task-week-wrap"><button class="week-arrow" id="task-week-prev" aria-label="上一周"><i data-lucide="chevron-left"></i></button><div class="task-week" id="task-week"></div><button class="week-arrow" id="task-week-next" aria-label="下一周"><i data-lucide="chevron-right"></i></button></div>
+          <div class="parent-task-list" id="parent-task-list"></div>
+        </section>
+
+        <section class="page parent-page" id="assignment-editor">
+          <div class="page-heading"><div><p class="eyebrow">创建学习安排</p><h1>分配任务</h1></div><button class="secondary-button" id="back-to-task-list">返回任务列表</button></div>
+          <form class="assignment-form" id="assignment-form">
+            <section><h2>任务内容</h2><label>任务标题<span>必填</span><input id="assignment-title" required maxlength="80" placeholder="请输入任务标题" /></label><label>任务说明<textarea id="assignment-detail" maxlength="300" placeholder="写下简单的步骤或小提醒"></textarea></label><div class="form-row"><label>任务分类<span>必填</span><span class="category-select-control"><span class="category-select-icon" id="assignment-category-icon"></span><select id="assignment-category" required></select></span></label><label>预计时长<span>必填</span><span class="number-with-unit"><input id="assignment-duration" type="number" min="1" max="240" value="15" required /><b>分钟</b></span></label></div><div class="assignment-resource"><input id="assignment-resource-file" type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip" hidden /><div><b>任务资料</b><span>选填，可上传图片、视频或文件，最大 6 MB</span></div><button type="button" class="secondary-button" id="pick-assignment-resource">＋ 选择文件</button><div id="assignment-resource-preview" hidden></div></div></section>
+            <section><h2>分配对象</h2><div class="assignment-students" id="assignment-students"></div><p class="form-hint">可同时选择多名学生</p></section>
+            <section><h2>分配日期</h2><div class="segmented-control"><button type="button" class="selected" data-assignment-date-mode="single">指定日期</button><button type="button" data-assignment-date-mode="range">连续日期</button></div><div class="assignment-date-fields"><label>任务日期<input id="assignment-single-date" type="date" required /></label><div class="form-row" id="assignment-range-fields" hidden><label>开始日期<input id="assignment-start-date" type="date" /></label><label>结束日期<input id="assignment-end-date" type="date" /></label></div></div><p class="form-hint" id="assignment-date-hint" hidden>连续日期最多可选择 30 天</p></section>
+            <section><h2>反馈与奖励</h2><div class="form-row"><label>反馈要求<select id="assignment-feedback"><option value="photo_or_video">拍照或视频均可</option><option value="photo">拍照</option><option value="video">上传视频</option><option value="none">不需要反馈</option></select></label><label>奖励星星<span>必填</span><span class="number-with-unit"><input id="assignment-stars" type="number" min="1" max="5" value="1" required /><b>颗</b></span></label></div><label class="toggle-row"><input id="assignment-review" type="checkbox" checked /><span></span>需要家长审核</label></section>
+            <p class="login-error" id="assignment-error"></p><div class="form-actions"><button type="button" class="secondary-button" id="cancel-assignment">取消</button><button class="primary-button" type="submit">确认分配</button></div>
+          </form>
+        </section>
+
+        <section class="page parent-page" id="categories"><div class="page-heading"><div><p class="eyebrow">任务设置</p><h1>任务分类</h1></div><button class="primary-button" id="add-category">＋ 新增分类</button></div><div class="category-list" id="category-list"></div></section>
+
+        <section class="page parent-page" id="review">
+          <div class="page-heading"><div><p class="eyebrow">审核中心</p><h1>待审核任务</h1></div><span class="page-count" id="review-count">0 项待审核</span></div>
+          <div class="review-groups" id="review-list"></div>
+        </section>
+
+        <section class="page parent-page" id="stats">
+          <div class="page-heading"><div><p class="eyebrow">全部学生</p><h1>学习数据统计</h1></div><span class="stats-range-label" id="stats-range-label"></span></div>
+          <div class="stats-period-tabs" aria-label="统计时间范围"><button class="selected" data-stats-period="week">周榜</button><button data-stats-period="month">月榜</button><button data-stats-period="last_week">上周榜</button><button data-stats-period="last_month">上月榜</button><button data-stats-period="all">总榜</button><button data-stats-period="custom">自定义</button></div>
+          <form class="custom-stats-range" id="custom-stats-range" hidden><label>开始日期<input type="date" id="stats-start-date" required /></label><label>结束日期<input type="date" id="stats-end-date" required /></label><button class="primary-button" type="submit">开始统计</button></form>
+          <section class="ranking-panel"><div class="section-title"><h2 id="ranking-title">学生周榜</h2><span>按星星数排序</span></div><div class="ranking-list" id="ranking-list"></div></section>
+        </section>
+      </main>
+    </div>
+
+    <nav class="bottom-nav" aria-label="学生端移动导航"><button class="active" data-page="today"><i data-lucide="clipboard-check"></i><span>我的任务</span></button><button data-page="tasks"><i data-lucide="list-todo"></i><span>任务列表</span></button><button data-page="growth"><i data-lucide="sparkles"></i><span>成长星球</span></button></nav>
+
+    <dialog id="task-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="task-modal-content"></div></dialog>
+    <dialog id="review-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="review-modal-content"></div></dialog>
+    <dialog id="feedback-preview-dialog" class="media-preview-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="media-preview-content" id="feedback-preview-content"></div></dialog>
+    <dialog id="password-dialog"><div class="modal-content"><p class="eyebrow">账号安全</p><h2>请修改初始密码</h2><p>管理员首次登录后需要设置新的安全密码。</p><form id="password-form" class="password-form"><label>当前密码<input id="current-password" type="password" autocomplete="current-password" required /></label><label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="10" required placeholder="至少 10 位，包含字母和数字" /></label><p id="password-error" class="login-error"></p><button class="primary-button" type="submit">保存新密码</button></form></div></dialog>
+    <dialog id="student-dialog"><button class="modal-close" type="button" aria-label="关闭" title="关闭">×</button><div class="modal-content"><p class="eyebrow" id="student-form-eyebrow">学生管理</p><h2 id="student-form-title">新增学生</h2><form id="student-form" class="student-form"><input id="student-id" type="hidden" /><div class="form-row"><label>学生昵称<span>必填</span><input id="student-name" required minlength="2" maxlength="12" placeholder="例如：小宇" /></label><label>年级<span>必填</span><select id="student-grade"><option>一年级</option><option>二年级</option><option selected>三年级</option><option>四年级</option><option>五年级</option><option>六年级</option></select></label></div><label>学生头像<span>必填</span><div class="avatar-upload-control"><span class="avatar-preview" id="student-avatar-preview">学</span><span class="avatar-upload-copy"><input id="student-avatar" type="file" accept="image/png,image/jpeg,image/webp" /><small>上传 JPG、PNG 或 WebP 图片，最大 2 MB</small></span></div></label><div id="student-account-fields"><label>登录用户名<span id="student-username-note">必填，创建后不可修改</span><input id="student-username" required minlength="3" maxlength="48" placeholder="至少 3 位字符" /></label><label id="student-password-field">初始密码<span>必填</span><input id="student-initial-password" type="password" required minlength="10" placeholder="至少 10 位字符" /></label><fieldset id="student-parent-picker" class="parent-picker-field admin-only"><legend>关联家长<span>可多选</span></legend><div class="parent-multi-select" id="student-parent-options"></div></fieldset></div><label>备注<textarea id="student-note" maxlength="160" placeholder="学习习惯或家长提醒（选填）"></textarea></label><p id="student-form-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button class="primary-button" id="student-submit" type="submit">创建学生</button></div></form></div></dialog>
+    <div class="student-action-menu" id="student-action-menu" role="menu" hidden><button id="edit-student-action" role="menuitem"><i data-lucide="pencil"></i>修改信息</button><button id="reset-student-password-action" role="menuitem"><i data-lucide="key-round"></i>重置密码</button><button class="admin-only" id="link-student-parent-action" role="menuitem"><i data-lucide="user-round-plus"></i>关联家长</button><button id="unlink-student-action" role="menuitem"><i data-lucide="unlink"></i>解除关联</button><button class="danger" id="toggle-student-status-action" role="menuitem"><i data-lucide="user-round-x"></i><b>禁用用户</b></button></div>
+    <dialog id="parent-dialog" class="input-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">家长管理</p><h2 id="parent-dialog-title">新增家长</h2><form id="parent-form" class="dialog-form"><input id="parent-id" type="hidden" /><label>家长昵称<span>必填</span><input id="parent-name" required minlength="2" maxlength="24" placeholder="例如：小宇妈妈" /></label><label>用户名<span id="parent-username-note">必填，创建后不可修改</span><input id="parent-username" required minlength="3" maxlength="48" placeholder="字母、数字、点、下划线或短横线" /></label><label>家长头像<span>选填</span><div class="avatar-upload-control"><span class="avatar-preview" id="parent-avatar-preview">家</span><span class="avatar-upload-copy"><input id="parent-avatar" type="file" accept="image/png,image/jpeg,image/webp" /><small>未上传时显示昵称最后一个字；支持 JPG、PNG、WebP，最大 2 MB</small></span></div></label><label id="parent-password-field">初始密码<span>必填</span><input id="parent-password" type="password" minlength="10" placeholder="至少 10 位，包含字母和数字" /></label><p id="parent-form-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="submit" class="primary-button" id="parent-submit">创建家长</button></div></form></div></dialog>
+    <dialog id="reset-parent-password-dialog" class="input-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">账号安全</p><h2>重置家长密码</h2><form id="reset-parent-password-form" class="dialog-form"><label>新密码<input id="reset-parent-password" type="password" minlength="10" required placeholder="至少 10 位，包含字母和数字" /></label><p id="reset-parent-password-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="submit" class="primary-button">保存新密码</button></div></form></div></dialog>
+    <dialog id="parent-status-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">账号状态</p><h2 id="parent-status-title">确认禁用家长账号？</h2><p id="parent-status-description">禁用后，该家长将立即退出并无法登录系统。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-parent-status">确认禁用</button></div></div></dialog>
+    <dialog id="link-parent-dialog" class="input-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">学生关联</p><h2>关联已有家长</h2><form id="link-parent-form" class="dialog-form"><label>选择家长<select id="link-parent-select" required></select></label><p id="link-parent-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="submit" class="primary-button">确认关联</button></div></form></div></dialog>
+    <dialog id="unlink-student-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">学生关联</p><h2>确认解除家长与学生的关联？</h2><p id="unlink-student-description">解除后，家长账号将无法再查看这名学生。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-unlink-student">确认解绑</button></div></div></dialog>
+    <dialog id="reset-student-password-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">账号安全</p><h2>重置学生密码</h2><p>保存后，学生需要用新密码重新登录。</p><form id="reset-student-password-form" class="password-form"><label>新密码<input id="reset-student-password" type="password" minlength="10" required placeholder="至少 10 位字符" /></label><p id="reset-student-password-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button class="primary-button" type="submit">保存新密码</button></div></form></div></dialog>
+    <dialog id="logout-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">退出登录</p><h2>确认退出当前账号？</h2><p>退出后将返回登录页面。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-logout">确认退出</button></div></div></dialog>
+    <dialog id="student-status-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">账号状态</p><h2 id="student-status-title">确认禁用学生账号？</h2><p id="student-status-description">禁用后，该学生将无法登录系统。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-student-status">确认禁用</button></div></div></dialog>
+    <dialog id="category-dialog" class="input-dialog category-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">任务设置</p><h2 id="category-dialog-title">新增分类</h2><form id="category-form" class="dialog-form"><input id="category-id" type="hidden" /><label>分类名称<span>必填</span><input id="category-name" required minlength="2" maxlength="24" placeholder="例如：科学探索" /></label><fieldset class="icon-picker-field"><legend>分类图标<span>必选</span></legend><div class="icon-picker" id="category-icon-options" aria-label="选择分类图标"></div></fieldset><p class="login-error" id="category-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="submit" class="primary-button" id="category-submit">保存</button></div></form></div></dialog>
+    <dialog id="task-delete-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">删除任务</p><h2>确认删除当天这项任务？</h2><p>只会删除当前日期下的这条任务，不影响其他日期的同名任务。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-task-delete">确认删除</button></div></div></dialog>
+    <dialog id="category-delete-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">删除分类</p><h2>确认删除这个任务分类？</h2><p>已有任务不会受影响，之后分配任务时将不再显示该分类。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-category-delete">确认删除</button></div></div></dialog>
+    <div class="toast" id="toast" role="status"></div>
+    <script src="assets/vendor/lucide.min.js?v=1.42.0"></script>
+    <script src="app.js?v=20260908-ui4"></script>
+  </body>
+</html>
