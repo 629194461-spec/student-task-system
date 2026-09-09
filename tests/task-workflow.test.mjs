@@ -45,13 +45,14 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   const categoryId = categories.body.categories[0].id;
   const dashboard = await request('/api/parent/dashboard', { cookie: admin, method: 'GET' });
   const currentDate = dashboard.body.period.today;
-  const assign = async (studentId, title, date, needsReview = true) => request('/api/parent/tasks', {
+  const assign = async (studentId, title, date, needsReview = true, resources = []) => request('/api/parent/tasks', {
     cookie: admin,
     method: 'POST',
-    body: JSON.stringify({ studentIds: [studentId], title, detail: '真实接口测试', categoryId, duration: 10, stars: 2, feedbackType: 'none', needsReview, startDate: date, endDate: date })
+    body: JSON.stringify({ studentIds: [studentId], title, detail: '真实接口测试', categoryId, duration: 10, stars: 2, feedbackType: 'none', needsReview, startDate: date, endDate: date, resources })
   });
 
-  const draftTask = await assign(firstId, '草稿任务', currentDate);
+  const parentFile = { name: '家长学习资料.txt', data: 'data:text/plain;base64,5rWL6K+V' };
+  const draftTask = await assign(firstId, '草稿任务', currentDate, true, [parentFile]);
   const completedTask = await assign(firstId, '直接完成任务', currentDate, false);
   const futureTask = await assign(firstId, '未来任务', addDays(currentDate, 1));
   const otherTask = await assign(secondId, '另一学生任务', currentDate);
@@ -62,14 +63,29 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal(firstLogin.response.status, 200);
   assert.equal(secondLogin.response.status, 200);
 
+  const studentWeek = await request(`/api/student/dashboard?date=${currentDate}`, { cookie: firstLogin.cookie });
+  assert.equal(Object.keys(studentWeek.body.weekTasks).length, 7);
+  assert.ok(studentWeek.body.weekTasks[currentDate].some(task => task.title === '草稿任务'));
+  assert.ok(studentWeek.body.weekTasks[addDays(currentDate, 1)].some(task => task.title === '未来任务'));
+  const parentWeek = await request(`/api/parent/tasks?date=${currentDate}&studentId=${firstId}`, { cookie: admin });
+  assert.equal(Object.keys(parentWeek.body.weekTasks).length, 7);
+  assert.ok(parentWeek.body.weekTasks[currentDate].some(task => task.title === '草稿任务'));
+  assert.ok(parentWeek.body.weekTasks[addDays(currentDate, 1)].some(task => task.title === '未来任务'));
+
   const draftId = draftTask.body.taskIds[0];
   const studentDetailBeforeStart = await request(`/api/student/tasks/${draftId}`, { cookie: firstLogin.cookie });
   assert.equal(studentDetailBeforeStart.response.status, 200);
   assert.equal(studentDetailBeforeStart.body.task.status, 'not_started', 'viewing details must not start a task');
+  assert.equal(studentDetailBeforeStart.body.task.resources[0].name, parentFile.name);
+  assert.equal(studentDetailBeforeStart.body.task.resources[0].data, parentFile.data, 'student detail must include downloadable parent files');
   const parentDetail = await request(`/api/parent/tasks/${draftId}`, { cookie: admin });
   assert.equal(parentDetail.response.status, 200);
   assert.equal(parentDetail.body.task.id, draftId);
   assert.equal(parentDetail.body.task.studentName, '测试学生甲');
+  const parentEditMetadata = await request(`/api/parent/tasks/${draftId}?includeData=0`, { cookie: admin });
+  assert.equal(parentEditMetadata.response.status, 200);
+  assert.equal(parentEditMetadata.body.task.resources[0].id > 0, true);
+  assert.equal(Object.hasOwn(parentEditMetadata.body.task.resources[0], 'data'), false, 'edit metadata must not download attachment bodies');
   const detailParentName = `detail_parent_${suffix}`;
   const detailParent = await request('/api/admin/parents', { cookie: admin, method: 'POST', body: JSON.stringify({ displayName: '详情测试家长', username: detailParentName, password: 'Parent2026A' }) });
   assert.equal(detailParent.response.status, 201);
@@ -90,9 +106,13 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal(edited.body.task.status, 'in_progress');
   const detail = await request(`/api/student/tasks/${draftId}`, { cookie: firstLogin.cookie });
   assert.equal(detail.body.task.feedbackNote, '已经完成一半');
+  assert.equal(detail.body.task.resources[0].data, parentFile.data, 'editing task fields must preserve unchanged attachments');
 
-  const pending = await request(`/api/student/tasks/${draftId}/submit`, { cookie: firstLogin.cookie, method: 'POST', body: JSON.stringify({ feedbackNote: '已完成' }) });
+  const pending = await request(`/api/student/tasks/${draftId}/submit`, { cookie: firstLogin.cookie, method: 'POST', body: JSON.stringify({ feedbackData: avatar, feedbackName: '学习成果.png', feedbackNote: '已完成' }) });
   assert.equal(pending.body.task.status, 'pending_review');
+  const submittedDetail = await request(`/api/parent/tasks/${draftId}`, { cookie: admin });
+  assert.equal(submittedDetail.body.task.feedbackName, '学习成果.png');
+  assert.equal(submittedDetail.body.task.feedbackData, avatar, 'parent detail must include downloadable student feedback');
   const editPending = await request(`/api/parent/tasks/${draftId}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ studentId: firstId, title: '不应保存', categoryId, duration: 10, stars: 1, feedbackType: 'none', needsReview: true, date: currentDate }) });
   assert.equal(editPending.response.status, 409);
   const completedId = completedTask.body.taskIds[0];
@@ -107,6 +127,8 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   const completedList = await request('/api/student/tasks?filter=completed', { cookie: firstLogin.cookie });
   const futureList = await request('/api/student/tasks?filter=future', { cookie: firstLogin.cookie });
   assert.deepEqual(pendingList.body.tasks.map(task => task.id), [draftId]);
+  assert.equal(pendingList.body.tasks[0].resourceName, parentFile.name);
+  assert.equal(pendingList.body.tasks[0].resourceCount, 1);
   assert.ok(completedList.body.tasks.some(task => task.id === completedId));
   assert.ok(futureList.body.tasks.some(task => task.id === futureTask.body.taskIds[0]));
 
@@ -114,6 +136,55 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   const secondDashboard = await request(`/api/parent/dashboard?studentId=${secondId}`, { cookie: admin });
   assert.equal(firstDashboard.body.summary.pending, 1);
   assert.ok(firstDashboard.body.pending.every(task => task.studentId === firstId));
+  assert.equal(firstDashboard.body.pending[0].resourceName, parentFile.name);
   assert.equal(secondDashboard.body.summary.pending, 1);
   assert.ok(secondDashboard.body.pending.every(task => task.studentId === secondId));
+  const reviewList = await request('/api/parent/reviews?studentId=all&period=all', { cookie: admin });
+  const draftReview = reviewList.body.reviews.find(task => task.id === draftId);
+  assert.equal(draftReview.resourceName, parentFile.name);
+  assert.equal(draftReview.resourceCount, 1);
+
+  const recurring = await request('/api/parent/tasks', {
+    cookie: admin,
+    method: 'POST',
+    body: JSON.stringify({ studentIds: [firstId], title: '每日阅读', detail: '重复任务测试', categoryId, duration: 15, stars: 1, feedbackType: 'none', needsReview: true, scheduleType: 'repeat', repeatPattern: 'daily', startDate: currentDate, endDate: addDays(currentDate, 2) })
+  });
+  assert.equal(recurring.response.status, 201);
+  assert.equal(recurring.body.taskIds.length, 3);
+  const recurringDetails = [];
+  for (const id of recurring.body.taskIds) recurringDetails.push((await request(`/api/parent/tasks/${id}`, { cookie: admin })).body.task);
+  assert.ok(recurringDetails.every(task => task.isRecurring && task.repeatPattern === 'daily'));
+  assert.equal(new Set(recurringDetails.map(task => task.seriesId)).size, 1);
+
+  const lockedRecurringId = recurring.body.taskIds[0];
+  assert.equal((await request(`/api/student/tasks/${lockedRecurringId}/submit`, { cookie: firstLogin.cookie, method: 'POST', body: '{}' })).body.task.status, 'pending_review');
+  const editableRecurringId = recurring.body.taskIds[1];
+  const seriesUpdated = await request(`/api/parent/tasks/${editableRecurringId}`, {
+    cookie: admin,
+    method: 'PATCH',
+    body: JSON.stringify({ studentId: firstId, title: '每日阅读已调整', detail: '系列修改', categoryId, duration: 18, stars: 4, feedbackType: 'none', needsReview: true, date: addDays(currentDate, 1), scope: 'series' })
+  });
+  assert.equal(seriesUpdated.response.status, 200);
+  assert.equal(seriesUpdated.body.updatedCount, 2);
+  assert.equal(seriesUpdated.body.skippedCount, 1);
+  assert.equal((await request(`/api/parent/tasks/${lockedRecurringId}`, { cookie: admin })).body.task.title, '每日阅读');
+  assert.equal((await request(`/api/parent/tasks/${editableRecurringId}`, { cookie: admin })).body.task.title, '每日阅读已调整');
+
+  const seriesDeleted = await request(`/api/parent/tasks/${editableRecurringId}?scope=series`, { cookie: admin, method: 'DELETE' });
+  assert.equal(seriesDeleted.response.status, 200);
+  assert.equal(seriesDeleted.body.deletedCount, 2);
+  assert.equal(seriesDeleted.body.skippedCount, 1);
+  assert.equal((await request(`/api/parent/tasks/${lockedRecurringId}`, { cookie: admin })).response.status, 200, 'pending review occurrence must be preserved');
+  assert.equal((await request(`/api/parent/tasks/${editableRecurringId}`, { cookie: admin })).response.status, 404);
+
+  const largeImageBytes = Buffer.alloc(Math.floor(3.2 * 1024 * 1024), 0x61);
+  largeImageBytes.set([0xff, 0xd8, 0xff], 0);
+  const largeImageTask = await assign(secondId, '大图片资料测试', addDays(currentDate, 3), true, [{ name: '3MB学习图片.jpg', data: `data:image/jpeg;base64,${largeImageBytes.toString('base64')}` }]);
+  assert.equal(largeImageTask.response.status, 201, 'a single image under 6 MB must upload successfully');
+  const largeImageDetail = await request(`/api/parent/tasks/${largeImageTask.body.taskIds[0]}`, { cookie: admin });
+  assert.equal(largeImageDetail.body.task.resourceCount, 1);
+  assert.equal(largeImageDetail.body.task.resources[0].name, '3MB学习图片.jpg');
+
+  const genericFileTask = await assign(secondId, '通用文件资料测试', addDays(currentDate, 4), true, [{ name: '练习资料.bin', data: 'data:application/octet-stream;base64,AQID' }]);
+  assert.equal(genericFileTask.response.status, 201, 'generic files under 6 MB are accepted as downloadable resources');
 });

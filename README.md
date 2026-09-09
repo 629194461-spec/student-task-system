@@ -14,6 +14,22 @@ npm start
 | --- | --- | --- |
 | `admin` | `admin@2026` | 内置超级管理员，可管理全部家长和学生 |
 
+## 隔离测试
+
+测试时请使用独立的数据目录和端口，避免连接生产数据库：
+
+```bash
+DATA_DIR=/private/tmp/learning-planet-test PORT=4188 npm start
+```
+
+访问 `http://127.0.0.1:4188`。该地址创建的账号、学生、模板和任务只会写入 `/private/tmp/learning-planet-test/learning-planet.db`，不会进入默认的 `data/learning-planet.db` 或 Docker 的生产数据卷。测试结束后可停止该进程并删除此测试目录。
+
+接口回归测试也采用临时数据库，执行后会自动清理：
+
+```bash
+npm test
+```
+
 ## 生产部署
 
 1. 复制 `.env.example` 为 `.env`。首次部署后使用内置超级管理员登录。

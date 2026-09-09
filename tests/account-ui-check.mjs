@@ -5,6 +5,7 @@ const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
 const base = process.env.TEST_BASE_URL || 'http://127.0.0.1:4175';
 const screenshot = process.env.TEST_SCREENSHOT || '/tmp/learning-account-admin.png';
+const avatar = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
 const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' });
 try {
@@ -45,7 +46,10 @@ try {
   assert.equal(await page.locator('#students-page-title').textContent(), '全部学生');
   assert.match(await page.locator('.student-card').first().textContent(), /用户名：/);
   await page.locator('#add-student').click();
-  assert.ok(await page.locator('#student-parent-options .parent-choice').count() >= 1);
+  assert.equal(await page.locator('#student-parent-options').isVisible(), true);
+  await page.locator('#student-name').fill('示例学生宇');
+  assert.equal(await page.locator('#student-avatar-preview').textContent(), '宇');
+  assert.equal(await page.locator('#student-avatar').getAttribute('required'), null);
   await page.locator('#student-dialog .modal-close').click();
   await page.locator('[data-student-actions]').first().click();
   await page.locator('#edit-student-action').click();
@@ -63,6 +67,31 @@ try {
     assert.match(await firstRanking.textContent(), /按时率/);
   }
   await page.screenshot({ path: screenshot, fullPage: true });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => {
+    openStudentForm();
+    document.querySelector('#student-name').value = '手机学生星';
+    document.querySelector('#student-name').dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  assert.equal(await page.locator('#student-avatar-preview').textContent(), '星');
+  const mobileStudentDialog = await page.locator('#student-dialog').boundingBox();
+  assert.ok(mobileStudentDialog && mobileStudentDialog.x >= 0 && mobileStudentDialog.x + mobileStudentDialog.width <= 390);
+  await page.locator('#student-dialog .modal-close').click();
+
+  await page.evaluate(resourceData => {
+    const task = { hasResource: true, resources: [{ name: '家庭学习资料.png', kind: 'image', data: resourceData }], hasFeedback: true, feedbackName: '学生学习成果.png', feedbackKind: 'image', feedbackData: resourceData };
+    document.querySelector('#task-detail-modal-content').innerHTML = `<div class="modal-content">${taskResourceMarkup(task)}${taskFeedbackEvidence(task)}</div>`;
+    document.querySelector('#task-detail-dialog').showModal();
+    refreshIcons();
+  }, avatar);
+  assert.equal(await page.locator('#task-detail-dialog [data-preview-task-resource]').count(), 1);
+  assert.equal(await page.locator('#task-detail-dialog [data-preview-parent-feedback]').count(), 1);
+  assert.equal(await page.locator('#task-detail-dialog a[download="家庭学习资料.png"]').count(), 1);
+  assert.equal(await page.locator('#task-detail-dialog a[download="学生学习成果.png"]').count(), 1);
+  const mobileDetailDialog = await page.locator('#task-detail-dialog').boundingBox();
+  assert.ok(mobileDetailDialog && mobileDetailDialog.x >= 0 && mobileDetailDialog.x + mobileDetailDialog.width <= 390);
+  await page.screenshot({ path: screenshot.replace('.png', '-mobile-downloads.png'), fullPage: true });
 
 } finally {
   await browser.close();

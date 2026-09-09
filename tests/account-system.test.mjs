@@ -45,13 +45,15 @@ test('admin manages parent accounts and parent-student visibility', async () => 
 
   const duplicateAcrossRoles = await request('/api/parent/students', { cookie: admin, method: 'POST', body: JSON.stringify({ displayName: '重复账号', username: p1Name, password: 'Student2026A', avatar, grade: '四年级' }) });
   assert.equal(duplicateAcrossRoles.response.status, 409);
-  const studentCreate = await request('/api/parent/students', { cookie: admin, method: 'POST', body: JSON.stringify({ displayName: '测试学生', username: studentName, password: 'Student2026A', avatar, grade: '四年级', parentIds: [p1Id, p2Id] }) });
+  const studentCreate = await request('/api/parent/students', { cookie: admin, method: 'POST', body: JSON.stringify({ displayName: '测试学生', username: studentName, password: 'Student2026A', grade: '四年级', parentIds: [p1Id, p2Id] }) });
   assert.equal(studentCreate.response.status, 201);
+  assert.equal(studentCreate.body.student.avatar, '生');
   const studentId = studentCreate.body.student.id;
   assert.deepEqual(new Set(studentCreate.body.student.parents.map(parent => parent.id)), new Set([p1Id, p2Id]));
-  const immutableStudentUsername = await request(`/api/parent/students/${studentId}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ displayName: '测试学生新', username: `changed_student_${suffix}`, avatar, grade: '四年级', note: '' }) });
+  const immutableStudentUsername = await request(`/api/parent/students/${studentId}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ displayName: '测试学生新', username: `changed_student_${suffix}`, grade: '四年级', note: '' }) });
   assert.equal(immutableStudentUsername.response.status, 200);
   assert.equal(immutableStudentUsername.body.student.username, studentName);
+  assert.equal(immutableStudentUsername.body.student.avatar, '新');
 
   const p1Login = await login(p1Name, 'Parent2026A');
   assert.equal(p1Login.response.status, 200);
