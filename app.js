@@ -1,6 +1,6 @@
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const $$ = (selector, parent = document) => [...parent.querySelectorAll(selector)];
-const state = { user: null, role: 'student', captchaId: null, student: null, parent: null, parents: [], students: [], tasks: [], studentListTasks: [], studentTaskFilter: 'overdue', studentDate: '', categories: [], reviews: [], statsPeriod: 'week', dashboardStudentId: null, activeStudentId: null, activeParentId: null, studentAvatar: '', parentAvatar: '', taskFeedbackData: '', taskFeedbackName: '', taskResourceData: '', taskResourceName: '', activeTaskDetail: null, pendingStudentStatus: null, pendingParentStatus: null, pendingUnlinkParentId: null, taskDate: '', taskStudentId: null, parentTasks: [], taskDates: [], assignmentDateMode: 'single', selectedCategoryIcon: '', pendingTaskId: null, pendingCategoryId: null };
+const state = { user: null, role: 'student', captchaId: null, student: null, parent: null, parents: [], students: [], tasks: [], studentListTasks: [], studentTaskFilter: 'overdue', studentDate: '', studentDashboardCache: new Map(), studentLoadController: null, pageLoads: new Map(), pageLoadedAt: new Map(), categories: [], templates: [], templateCategoryFilter: 'all', editingTemplateId: null, templateResourceData: '', templateResourceName: '', templateResourceExisting: false, removeTemplateResource: false, selectedTemplateIds: [], templateDateMode: 'single', pendingTemplateId: null, reviews: [], statsPeriod: 'week', dashboardStudentId: null, activeStudentId: null, activeParentId: null, studentAvatar: '', parentAvatar: '', taskFeedbackData: '', taskFeedbackName: '', taskResourceData: '', taskResourceName: '', taskResourceExisting: false, removeTaskResource: false, editingTaskId: null, activeTaskDetail: null, pendingStudentStatus: null, pendingParentStatus: null, pendingUnlinkParentId: null, taskDate: '', taskStudentId: null, parentTasks: [], taskDates: [], assignmentDateMode: 'single', selectedCategoryIcon: '', pendingTaskId: null, pendingCategoryId: null };
 const statusMeta = { not_started: ['waiting', '等待开始', '开始任务'], in_progress: ['draft', '进行中', '继续任务'], pending_review: ['waiting', '待审核', '等待审核'], completed: ['done', '已完成', '已完成'], needs_more: ['draft', '待补充', '补充反馈'] };
 const categoryClass = { '语文小屋': 'cat-chinese', '数学乐园': 'cat-math', '阅读时光': 'cat-reading', '生活小能手': 'cat-life' };
 const categoryIcons = [
@@ -80,9 +80,18 @@ async function prepareTaskResource(file) {
   return await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('任务资料读取失败')); reader.readAsDataURL(file); });
 }
 function showToast(message) { const toast = $('#toast'); toast.textContent = message; toast.classList.add('show'); clearTimeout(showToast.timer); showToast.timer = setTimeout(() => toast.classList.remove('show'), 3000); }
+function ensurePageData(key, loader, maxAge = 30000) {
+  if (Date.now() - (state.pageLoadedAt.get(key) || 0) < maxAge) return Promise.resolve();
+  if (state.pageLoads.has(key)) return state.pageLoads.get(key);
+  const request = Promise.resolve().then(loader).then(result => { state.pageLoadedAt.set(key, Date.now()); return result; }).finally(() => state.pageLoads.delete(key));
+  state.pageLoads.set(key, request);
+  return request;
+}
+function loadInBackground(key, loader, maxAge = 30000) { ensurePageData(key, loader, maxAge).catch(error => showToast(error.message)); }
 function clearActivePages() { $$('.page').forEach(page => { page.classList.remove('active'); page.hidden = true; }); }
 function setStudentPage(id) { clearActivePages(); const page = document.getElementById(id); page.hidden = false; page.classList.add('active'); $$('[data-page]').forEach(button => button.classList.toggle('active', button.dataset.page === id)); window.scrollTo(0, 0); }
 function setParentPage(id) { clearActivePages(); const page = document.getElementById(id); page.hidden = false; page.classList.add('active'); $$('[data-parent-page]').forEach(button => button.classList.toggle('active', button.dataset.parentPage === id)); window.scrollTo(0, 0); }
+function closeParentMobileMenu() { $('#app-shell').classList.remove('mobile-menu-open'); $('#parent-mobile-menu-button').setAttribute('aria-expanded', 'false'); $('#parent-sidebar-backdrop').hidden = true; }
 function displayApp() { $('#login-screen').hidden = true; $('#app-shell').hidden = false; setAvatar($('.avatar-button .avatar'), state.user.avatar, state.user.displayName?.slice(0, 1)); $('.avatar-name').textContent = state.user.displayName; $('.avatar-button').setAttribute('aria-label', `${state.user.displayName}的个人资料`); $('.avatar-button').title = `当前账号：${state.user.displayName}`; refreshIcons(); }
 function displayLogin() { $('#app-shell').hidden = true; $('#login-screen').hidden = false; clearActivePages(); }
 
@@ -101,7 +110,11 @@ function setLoginRole(role) {
 }
 function taskCard(task, compact = false) {
   const [klass, label, action] = statusMeta[task.status] || statusMeta.not_started;
-  return `<article class="task-card" data-task="${task.id}"><span class="category-icon ${categoryClass[task.category] || 'cat-math'}">${categoryIconMarkup(task.icon)}</span><div class="task-main"><h3>${escapeHtml(task.title)}</h3><div class="task-meta"><p>${icon('clock-3')} ${task.duration || 15} 分钟${task.hasResource ? ` · ${icon('paperclip')} 有资料` : ''}</p><span class="status ${klass}">${label}</span></div></div>${compact ? '' : `<div class="task-action"><span class="stars">⭐ ${task.stars} 颗星星</span><button class="${task.status === 'completed' ? 'success' : ''}" ${task.status === 'completed' ? 'disabled' : ''}>${action}</button></div>`}</article>`;
+  const actionClass = ['in_progress', 'needs_more'].includes(task.status) ? 'continue-task' : task.status === 'not_started' ? 'start-task' : 'pending-task';
+  const actionControl = task.status === 'completed'
+    ? `<span class="task-complete-icon" aria-label="已完成" title="已完成">${icon('check')}</span>`
+    : `<button class="${actionClass}" ${task.status === 'pending_review' ? 'disabled' : `data-start-task="${task.id}"`}>${action}</button>`;
+  return `<article class="task-card task-detail-row" data-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="category-icon ${categoryClass[task.category] || 'cat-math'}">${categoryIconMarkup(task.icon)}</span><div class="task-main"><h3>${escapeHtml(task.title)}</h3><div class="task-meta"><p>${icon('clock-3')} ${task.duration || 15} 分钟${task.hasResource ? ` · ${icon('paperclip')} 有资料` : ''}</p><span class="status ${klass}">${label}</span></div></div>${compact ? '' : `<div class="task-action"><span class="stars">⭐ ${task.stars} 颗星星</span>${actionControl}</div>`}</article>`;
 }
 function renderStudentWeek(data) {
   const labels = ['一', '二', '三', '四', '五', '六', '日'];
@@ -113,7 +126,7 @@ function renderStudentWeek(data) {
 }
 function studentTaskListRow(task) {
   const [klass, label] = statusMeta[task.status] || statusMeta.not_started;
-  return `<article class="student-task-row" data-task="${task.id}"><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3><p>${escapeHtml(shortDate(task.date))} · ${escapeHtml(task.category)} · ${task.duration || 0} 分钟${task.hasResource ? ' · 有资料' : ''}</p></div><span class="stars">⭐ ${task.stars}</span><span class="status ${klass}">${escapeHtml(label)}</span></article>`;
+  return `<article class="student-task-row task-detail-row" data-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3><p>${escapeHtml(shortDate(task.date))} · ${escapeHtml(task.category)} · ${task.duration || 0} 分钟${task.hasResource ? ' · 有资料' : ''}</p></div><span class="stars">⭐ ${task.stars}</span><span class="status ${klass}">${escapeHtml(label)}</span></article>`;
 }
 function renderStudent(data) {
   state.student = data; state.tasks = data.tasks; state.studentDate = data.date;
@@ -128,7 +141,7 @@ function renderStudent(data) {
   $('#progress-label').textContent = data.tasks.length ? `${completed} / ${data.tasks.length} 件完成` : '暂无任务';
   $('#progress-bar').style.width = `${data.tasks.length ? completed / data.tasks.length * 100 : 0}%`;
   renderStudentWeek(data);
-  $('.reward-timeline').innerHTML = data.rewards.map(reward => `<article><span class="reward-dot">★</span><div><h3>${reward.title || '学习任务'}</h3><p>${reward.message || '每一次认真完成都值得奖励。'}</p></div><strong>+${reward.stars}</strong></article>`).join('') || '<article><div><p>完成任务后，奖励会出现在这里。</p></div></article>';
+  $('.reward-timeline').innerHTML = data.rewards.map(reward => `<article><span class="reward-dot">★</span><div><h3>${reward.title || '学习任务'}</h3><p>${reward.message || '每一次认真完成都值得奖励。'}</p></div><strong>+${reward.stars}</strong></article>`).join('') || `<div class="reward-empty" role="status"><span class="reward-empty-icon">${icon('gift')}</span><div><h3>暂时没有收到家长奖励</h3><p>完成任务并通过审核后，奖励会显示在这里。</p></div></div>`;
   $$('.reward-numbers strong')[0].textContent = data.growth.stars;
   $$('.reward-numbers strong')[1].textContent = data.growth.moons;
   $$('.reward-numbers strong')[2].textContent = data.growth.suns;
@@ -147,7 +160,7 @@ async function loadStudentTaskList(filter = state.studentTaskFilter) {
   state.studentListTasks = data.tasks;
   renderStudentTaskList();
 }
-function reviewRow(task) { return `<article class="review-row"><span class="feedback-preview">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3><p>${escapeHtml(task.category)} · ${task.submittedAt ? formatDateTime(task.submittedAt) : '等待提交'} · ⭐ ${task.stars} 颗</p></div><button data-review="${task.id}">去审核</button></article>`; }
+function reviewRow(task) { return `<article class="review-row task-detail-row" data-parent-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="feedback-preview">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3><p>${escapeHtml(task.category)} · ${task.submittedAt ? formatDateTime(task.submittedAt) : '等待提交'} · ⭐ ${task.stars} 颗</p></div><button data-review="${task.id}">去审核</button></article>`; }
 function renderParent(data) {
   state.parent = data; state.dashboardStudentId = data.selectedStudentId;
   const child = data.students.find(student => student.id === data.selectedStudentId) || data.students[0];
@@ -163,13 +176,13 @@ function renderParent(data) {
   $('.week-complete-card strong').textContent = data.summary.weekTotal ? `${data.summary.weekCompleted} / ${data.summary.weekTotal}` : '--';
   $('.week-complete-card p').textContent = weekPercent === null ? '本周暂无任务' : `本周完成进度 ${weekPercent}%`;
   $('.week-overdue-card strong').textContent = data.summary.weekOverdue;
-  $('.week-overdue-card p').textContent = data.summary.weekOverdue ? `本周有 ${data.summary.weekOverdue} 个任务已逾期` : '本周没有逾期任务';
+  $('.week-overdue-card p').textContent = data.summary.weekOverdue ? '需要关注任务进度' : '任务均在计划内';
   $('.review-card strong').textContent = data.summary.pending;
-  $('.review-card p').textContent = `所有任务中有 ${data.summary.pending} 个待审核`;
+  $('.review-card p').textContent = data.summary.pending ? '点击进入审核中心' : '暂时无需处理';
   $('.today-complete-card strong').textContent = data.summary.todayTotal ? `${data.summary.todayCompleted} / ${data.summary.todayTotal}` : '--';
   $('.today-complete-card p').textContent = todayPercent === null ? '今日暂无任务' : `今日完成进度 ${todayPercent}%`;
   $('.week-star-card strong').textContent = data.summary.weekStars;
-  $('.week-star-card p').textContent = `本周已获得 ${data.summary.weekStars} 颗星星`;
+  $('.week-star-card p').textContent = data.summary.weekStars ? '来自本周完成的任务' : '完成任务后获得';
   $('#compact-review-list').innerHTML = data.pending.map(reviewRow).join('') || '<p class="empty-inline">当前学生的反馈都已审核完成。</p>';
   $('#parent-growth-rewards').innerHTML = growthRewardsHtml(data.growth);
   $('#parent-growth-title').textContent = child ? `${child.display_name}的成长` : '学生成长';
@@ -177,7 +190,27 @@ function renderParent(data) {
   $('.growth-inline .progress-track span').style.width = `${data.growth.stars}%`;
   refreshIcons();
 }
-async function loadStudent(date = state.studentDate || today()) { renderStudent(await api(`/api/student/dashboard?date=${encodeURIComponent(date)}`)); }
+function invalidateStudentDashboardCache() { state.studentDashboardCache.clear(); }
+async function loadStudent(date = state.studentDate || today(), { force = false } = {}) {
+  const selectedDate = date;
+  state.studentDate = selectedDate;
+  if (state.student) renderStudentWeek({ taskDates: state.student.taskDates || [] });
+  const cached = state.studentDashboardCache.get(selectedDate);
+  if (!force && cached && Date.now() - cached.cachedAt < 30000) { renderStudent(cached.data); return; }
+  state.studentLoadController?.abort();
+  const controller = new AbortController();
+  state.studentLoadController = controller;
+  $('#task-list')?.classList.add('is-loading');
+  try {
+    const data = await api(`/api/student/dashboard?date=${encodeURIComponent(selectedDate)}`, { signal: controller.signal });
+    state.studentDashboardCache.set(selectedDate, { data, cachedAt: Date.now() });
+    if (state.studentDate === selectedDate) renderStudent(data);
+  } catch (error) {
+    if (error.name !== 'AbortError') throw error;
+  } finally {
+    if (state.studentLoadController === controller) { state.studentLoadController = null; $('#task-list')?.classList.remove('is-loading'); }
+  }
+}
 async function loadParent(studentId = state.dashboardStudentId) { renderParent(await api(`/api/parent/dashboard${studentId ? `?studentId=${encodeURIComponent(studentId)}` : ''}`)); }
 function renderStudentCards() {
   const cards = state.students.map(student => {
@@ -195,7 +228,7 @@ function renderParents() {
 async function loadParents() { if (state.user?.role !== 'admin') return; const data = await api('/api/admin/parents'); state.parents = data.parents; renderParents(); }
 function reviewListRow(task) {
   const feedbackLabel = task.feedbackType === 'none' ? '无需反馈' : task.hasFeedback ? '已提交反馈' : '未上传附件';
-  return `<article class="review-list-row"><span class="student-avatar">${avatarMarkup(task.studentAvatar, task.studentName?.slice(0, 1))}</span><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3><p>${escapeHtml(task.category)} · ${feedbackLabel} · 提交于 ${formatDateTime(task.submittedAt)}</p></div><span class="stars">⭐ ${task.stars}</span><button class="primary-button" data-review="${task.id}">审核</button></article>`;
+  return `<article class="review-list-row task-detail-row" data-parent-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="student-avatar">${avatarMarkup(task.studentAvatar, task.studentName?.slice(0, 1))}</span><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3><p>${escapeHtml(task.category)} · ${feedbackLabel} · 提交于 ${formatDateTime(task.submittedAt)}</p></div><span class="stars">⭐ ${task.stars}</span><button class="primary-button" data-review="${task.id}">审核</button></article>`;
 }
 function renderReviews() {
   $('#review-count').textContent = `${state.reviews.length} 项待审核`;
@@ -234,15 +267,16 @@ function renderTaskWeek() {
 }
 function parentTaskRow(task) {
   const [, statusLabel] = statusMeta[task.status] || statusMeta.not_started;
-  const canDelete = !['pending_review', 'completed'].includes(task.status);
-  return `<article class="parent-task-row"><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div class="parent-task-main"><div><h3>${escapeHtml(task.title)}</h3><span class="status ${statusMeta[task.status]?.[0] || 'waiting'}">${escapeHtml(statusLabel)}</span></div><p>${escapeHtml(task.studentName || '')} · ${escapeHtml(task.category)} · ${task.duration || 0} 分钟 · ⭐ ${task.stars}${task.hasResource ? ` · ${icon('paperclip')} 有资料` : ''}</p></div>${canDelete ? `<button class="icon-button delete-task-button" data-delete-parent-task="${task.id}" aria-label="删除${escapeHtml(task.title)}" title="删除当天任务">${icon('trash')}</button>` : '<span class="task-delete-placeholder" aria-hidden="true"></span>'}</article>`;
+  const canManage = !['pending_review', 'completed'].includes(task.status);
+  const actions = canManage ? `<div class="parent-task-actions"><button class="icon-button edit-task-button" data-edit-parent-task="${task.id}" aria-label="修改${escapeHtml(task.title)}" title="修改任务">${icon('pencil')}</button><button class="icon-button delete-task-button" data-delete-parent-task="${task.id}" aria-label="删除${escapeHtml(task.title)}" title="删除当天任务">${icon('trash')}</button></div>` : '<span class="task-actions-placeholder" aria-hidden="true"></span>';
+  return `<article class="parent-task-row task-detail-row" data-parent-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div class="parent-task-main"><div><h3>${escapeHtml(task.title)}</h3><span class="status ${statusMeta[task.status]?.[0] || 'waiting'}">${escapeHtml(statusLabel)}</span></div><p>${escapeHtml(task.studentName || '')} · ${escapeHtml(task.category)} · ${task.duration || 0} 分钟 · ⭐ ${task.stars}${task.hasResource ? ` · ${icon('paperclip')} 有资料` : ''}</p></div>${actions}</article>`;
 }
 async function loadParentTasks() {
   const data = await api(`/api/parent/tasks?date=${encodeURIComponent(state.taskDate)}&studentId=${encodeURIComponent(state.taskStudentId || 'all')}`);
   state.parentTasks = data.tasks;
   state.taskDates = data.taskDates || [];
   renderTaskWeek();
-  $('#parent-task-list').innerHTML = data.tasks.map(parentTaskRow).join('') || emptyState('clipboard-list', '这一天还没有任务', '点击右上角“分配任务”创建学习安排。');
+  $('#parent-task-list').innerHTML = data.tasks.map(parentTaskRow).join('') || emptyState('clipboard-list', '这一天还没有任务', '可以新建任务，或从模板批量分配。');
   refreshIcons();
 }
 async function prepareTaskManager() {
@@ -259,6 +293,82 @@ function renderCategories() {
 }
 async function loadCategories() { const data = await api('/api/parent/categories'); state.categories = data.categories; renderCategories(); }
 function renderAssignmentCategoryIcon() { const category = state.categories.find(item => item.id === Number($('#assignment-category').value)) || state.categories[0]; $('#assignment-category-icon').innerHTML = category ? categoryIconMarkup(category.icon) : ''; }
+function templateVisibility(template) { return template.isPublic ? '开放模板' : '仅自己可见'; }
+function taskTemplateCard(template, selectable = false) {
+  const resource = template.hasResource ? `<span>${icon('paperclip')} ${escapeHtml(template.resourceName)}</span>` : '';
+  if (selectable) return `<label class="template-picker-card"><input type="checkbox" value="${template.id}" ${state.selectedTemplateIds.includes(template.id) ? 'checked' : ''}/><span class="category-icon" style="background:${escapeHtml(template.color)}1f">${categoryIconMarkup(template.icon)}</span><span class="template-picker-copy"><b>${escapeHtml(template.title)}</b><small>${escapeHtml(template.creatorName)} · ${template.duration} 分钟 · ⭐ ${template.stars}</small><small>${template.isPublic ? '开放模板' : '我的私有模板'}${template.hasResource ? ' · 含任务资料' : ''}</small></span><span class="template-check">${icon('check')}</span></label>`;
+  const actions = template.isOwner ? `<div class="template-card-actions"><button class="icon-button" data-edit-template="${template.id}" aria-label="修改${escapeHtml(template.title)}" title="修改模板">${icon('pencil')}</button><button class="icon-button danger-text" data-delete-template="${template.id}" aria-label="删除${escapeHtml(template.title)}" title="删除模板">${icon('trash')}</button></div>` : '';
+  return `<article class="template-card"><span class="category-icon" style="background:${escapeHtml(template.color)}1f">${categoryIconMarkup(template.icon)}</span><div class="template-card-main"><div class="template-card-title"><h3>${escapeHtml(template.title)}</h3><span class="template-visibility ${template.isPublic ? 'public' : 'private'}">${template.isPublic ? icon('globe-2') : icon('lock-keyhole')} ${templateVisibility(template)}</span></div><p>${escapeHtml(template.detail)}</p><div class="template-card-meta"><span>${icon('clock-3')} ${template.duration} 分钟</span><span>⭐ ${template.stars} 颗</span><span>${template.needsReview ? '需要审核' : '无需审核'}</span>${resource}<span>创建人：${escapeHtml(template.creatorName)}</span></div></div>${actions}</article>`;
+}
+function groupTemplates(templates) {
+  return state.categories.map(category => ({ category, templates: templates.filter(template => template.categoryId === category.id) })).filter(group => group.templates.length);
+}
+function renderTemplateGroups() {
+  const filtered = state.templateCategoryFilter === 'all' ? state.templates : state.templates.filter(template => template.categoryId === Number(state.templateCategoryFilter));
+  $('#template-count').textContent = `共 ${filtered.length} 个模板`;
+  $('#template-category-filter').innerHTML = `<option value="all">全部分类</option>${state.categories.map(category => `<option value="${category.id}">${escapeHtml(category.name)}</option>`).join('')}`;
+  $('#template-category-filter').value = state.templateCategoryFilter;
+  $('#template-groups').innerHTML = groupTemplates(filtered).map(group => `<section class="template-group"><div class="template-group-heading"><span class="category-icon" style="background:${escapeHtml(group.category.color)}1f">${categoryIconMarkup(group.category.icon)}</span><div><h2>${escapeHtml(group.category.name)}</h2><p>${group.templates.length} 个模板</p></div></div><div class="template-list">${group.templates.map(template => taskTemplateCard(template)).join('')}</div></section>`).join('') || emptyState('notebook-tabs', '暂无任务模板', '点击“新增模板”创建常用任务。');
+  refreshIcons();
+}
+async function loadTaskTemplates() { const data = await api('/api/parent/task-templates'); state.templates = data.templates; renderTemplateGroups(); }
+function renderTemplateCategoryIcon() { const category = state.categories.find(item => item.id === Number($('#template-category').value)) || state.categories[0]; $('#template-category-icon').innerHTML = category ? categoryIconMarkup(category.icon) : ''; }
+function renderTemplateResourcePreview() {
+  const preview = $('#template-resource-preview');
+  if (!state.templateResourceData && !state.templateResourceExisting) { preview.hidden = true; preview.innerHTML = ''; return; }
+  preview.hidden = false;
+  if (!state.templateResourceData) preview.innerHTML = `<span class="resource-file-icon">${icon('paperclip')}</span><div><b>${escapeHtml(state.templateResourceName || '已有任务资料')}</b><small>保留当前资料</small></div><button type="button" class="icon-button" id="clear-template-resource" aria-label="移除任务资料" title="移除">${icon('x')}</button>`;
+  refreshIcons();
+}
+function openTemplateEditor(template = null) {
+  state.editingTemplateId = template?.id || null;
+  $('#template-form').reset();
+  $('#template-editor-title').textContent = template ? '修改模板' : '新增模板';
+  $('#template-submit').textContent = template ? '保存修改' : '保存模板';
+  $('#template-title').value = template?.title || '';
+  $('#template-detail').value = template?.detail || '';
+  $('#template-duration').value = template?.duration || 15;
+  $('#template-stars').value = template?.stars || 1;
+  $('#template-feedback').value = template?.feedbackType || 'photo_or_video';
+  $('#template-review').checked = template ? template.needsReview : true;
+  $('#template-public').checked = template ? template.isPublic : false;
+  $('#template-category').innerHTML = state.categories.map(category => `<option value="${category.id}">${escapeHtml(category.name)}</option>`).join('');
+  $('#template-category').value = String(template?.categoryId || state.categories[0]?.id || '');
+  state.templateResourceData = ''; state.templateResourceName = template?.resourceName || ''; state.templateResourceExisting = Boolean(template?.hasResource); state.removeTemplateResource = false;
+  $('#template-resource-file').value = ''; $('#template-error').textContent = ''; renderTemplateResourcePreview(); renderTemplateCategoryIcon(); setParentPage('template-editor'); refreshIcons();
+}
+function renderTemplatePicker() {
+  $('#template-picker-groups').innerHTML = groupTemplates(state.templates).map(group => `<section class="template-picker-group"><div class="template-picker-heading"><span class="category-icon" style="background:${escapeHtml(group.category.color)}1f">${categoryIconMarkup(group.category.icon)}</span><div><h2>${escapeHtml(group.category.name)}</h2><p>${group.templates.length} 个可用模板</p></div></div><div class="template-picker-list">${group.templates.map(template => taskTemplateCard(template, true)).join('')}</div></section>`).join('') || emptyState('notebook-tabs', '暂无可用模板', '请先创建一个任务模板。');
+  $('#selected-template-summary').textContent = state.selectedTemplateIds.length ? `已选择 ${state.selectedTemplateIds.length} 个模板` : '尚未选择模板';
+  refreshIcons();
+}
+function setTemplateDateMode(mode) {
+  state.templateDateMode = mode;
+  $$('[data-template-date-mode]').forEach(button => button.classList.toggle('selected', button.dataset.templateDateMode === mode));
+  $('#template-single-date-wrap').hidden = mode !== 'single'; $('#template-single-date').required = mode === 'single';
+  $('#template-range-fields').hidden = mode !== 'range'; $('#template-start-date').required = mode === 'range'; $('#template-end-date').required = mode === 'range'; $('#template-date-hint').hidden = mode !== 'range';
+}
+function syncTemplateRangeLimit() {
+  const start = $('#template-start-date').value; if (!start) return;
+  $('#template-end-date').min = start; $('#template-end-date').max = addDays(start, 29);
+  if ($('#template-end-date').value < start || $('#template-end-date').value > addDays(start, 29)) $('#template-end-date').value = start;
+}
+function showTemplateAssignmentStep(step) {
+  $('#template-assign-step-one').hidden = step !== 1; $('#template-assign-form').hidden = step !== 2;
+  if (step === 2) {
+    const selected = state.templates.filter(template => state.selectedTemplateIds.includes(template.id));
+    $('#template-assignment-selection').textContent = `已选择 ${selected.length} 个模板：${selected.map(template => template.title).join('、')}`;
+    $('#template-assignment-students').innerHTML = activeStudents().map(student => `<label class="student-choice"><input type="checkbox" value="${student.id}" ${String(student.id) === String(state.taskStudentId) || activeStudents().length === 1 ? 'checked' : ''}/><span class="student-avatar">${avatarMarkup(student.avatar, student.display_name?.slice(0, 1))}</span><b>${escapeHtml(student.display_name)}</b></label>`).join('');
+    const date = state.taskDate || today(); $('#template-single-date').value = date; $('#template-start-date').value = date; $('#template-end-date').value = date; syncTemplateRangeLimit(); setTemplateDateMode('single');
+  }
+  refreshIcons();
+}
+async function openTemplateAssignment() {
+  setParentPage('template-assign');
+  await Promise.all([ensurePageData('categories', loadCategories), ensurePageData('students', loadStudents)]);
+  await ensurePageData('templates', loadTaskTemplates);
+  state.selectedTemplateIds = []; $('#template-assignment-error').textContent = ''; renderTemplatePicker(); showTemplateAssignmentStep(1); setParentPage('template-assign');
+}
 function setAssignmentDateMode(mode) {
   state.assignmentDateMode = mode;
   $$('[data-assignment-date-mode]').forEach(button => button.classList.toggle('selected', button.dataset.assignmentDateMode === mode));
@@ -276,19 +386,44 @@ function syncAssignmentRangeLimit() {
   $('#assignment-end-date').max = addDays(start, 29);
   if ($('#assignment-end-date').value < start || $('#assignment-end-date').value > addDays(start, 29)) $('#assignment-end-date').value = start;
 }
-function openAssignmentEditor() {
+function renderAssignmentResourcePreview(task = null) {
+  const preview = $('#assignment-resource-preview');
+  if (!state.taskResourceData && !state.taskResourceExisting) { preview.hidden = true; preview.innerHTML = ''; return; }
+  preview.hidden = false;
+  if (state.taskResourceData) return;
+  preview.innerHTML = `<span class="resource-file-icon">${icon('paperclip')}</span><div><b>${escapeHtml(state.taskResourceName || '已有任务资料')}</b><small>保留当前资料</small></div><button type="button" class="icon-button" id="clear-assignment-resource" aria-label="移除任务资料" title="移除">${icon('x')}</button>`;
+  refreshIcons();
+}
+function openAssignmentEditor(task = null) {
   const students = activeStudents();
-  $('#assignment-students').innerHTML = students.map(student => `<label class="student-choice"><input type="checkbox" value="${student.id}" ${String(student.id) === String(state.taskStudentId) ? 'checked' : ''}/><span class="student-avatar">${avatarMarkup(student.avatar, student.display_name?.slice(0, 1))}</span><b>${escapeHtml(student.display_name)}</b></label>`).join('');
+  state.editingTaskId = task?.id || null;
+  $('#assignment-form').reset();
+  const selectedStudentId = task?.studentId || state.taskStudentId;
+  $('#assignment-students').innerHTML = students.map(student => `<label class="student-choice"><input type="checkbox" value="${student.id}" ${String(student.id) === String(selectedStudentId) ? 'checked' : ''}/><span class="student-avatar">${avatarMarkup(student.avatar, student.display_name?.slice(0, 1))}</span><b>${escapeHtml(student.display_name)}</b></label>`).join('');
   if (!$('#assignment-students input:checked') && students[0]) $('#assignment-students input').checked = true;
-  $('#assignment-single-date').value = state.taskDate;
-  $('#assignment-start-date').value = state.taskDate;
-  $('#assignment-end-date').value = state.taskDate;
+  $('#assignment-editor-eyebrow').textContent = task ? '调整学习安排' : '创建学习安排';
+  $('#assignment-editor-title').textContent = task ? '修改任务' : '分配任务';
+  $('#assignment-submit').textContent = task ? '保存修改' : '确认分配';
+  $('#assignment-date-mode-control').hidden = Boolean(task);
+  $('#assignment-title').value = task?.title || '';
+  $('#assignment-detail').value = task?.detail || '';
+  $('#assignment-duration').value = task?.duration || 15;
+  $('#assignment-stars').value = task?.stars || 1;
+  $('#assignment-feedback').value = task?.feedbackType || 'photo_or_video';
+  $('#assignment-review').checked = task ? task.needsReview : true;
+  const assignmentDate = task?.date || state.taskDate;
+  $('#assignment-single-date').value = assignmentDate;
+  $('#assignment-start-date').value = assignmentDate;
+  $('#assignment-end-date').value = assignmentDate;
+  const category = task ? state.categories.find(item => item.name === task.category) : state.categories[0];
+  if (category) $('#assignment-category').value = String(category.id);
   syncAssignmentRangeLimit();
   $('#assignment-error').textContent = '';
-  state.taskResourceData = ''; state.taskResourceName = ''; $('#assignment-resource-file').value = ''; $('#assignment-resource-preview').hidden = true; $('#assignment-resource-preview').innerHTML = '';
+  state.taskResourceData = ''; state.taskResourceName = task?.resourceName || ''; state.taskResourceExisting = Boolean(task?.hasResource); state.removeTaskResource = false; $('#assignment-resource-file').value = ''; renderAssignmentResourcePreview(task);
   renderAssignmentCategoryIcon();
   setAssignmentDateMode('single');
   setParentPage('assignment-editor');
+  refreshIcons();
 }
 function openCategoryForm(category = null) {
   $('#category-id').value = category?.id || '';
@@ -300,8 +435,30 @@ function openCategoryForm(category = null) {
   $('#category-error').textContent = '';
   $('#category-dialog').showModal();
 }
+async function loadParentPageData(page) {
+  if (page === 'overview') return ensurePageData(`overview:${state.dashboardStudentId || 'default'}`, () => loadParent(), 15000);
+  if (page === 'parents' && state.user?.role === 'admin') return ensurePageData('parents', loadParents);
+  if (page === 'students') return ensurePageData('students', loadStudents);
+  if (page === 'assign') {
+    await Promise.all([ensurePageData('students', loadStudents), ensurePageData('categories', loadCategories)]);
+    state.taskDate ||= today();
+    renderTaskFilters(); renderTaskWeek();
+    return ensurePageData(`parent-tasks:${state.taskDate}:${state.taskStudentId || 'all'}`, loadParentTasks, 10000);
+  }
+  if (page === 'templates') {
+    await ensurePageData('categories', loadCategories);
+    return ensurePageData('templates', loadTaskTemplates);
+  }
+  if (page === 'categories' && state.user?.role === 'admin') return ensurePageData('categories', loadCategories);
+  if (page === 'review') return ensurePageData('reviews', loadReviews, 15000);
+  if (page === 'stats') {
+    $('#stats-start-date').value ||= startOfWeek(today()); $('#stats-end-date').value ||= today();
+    const range = state.statsPeriod === 'custom' ? `${$('#stats-start-date').value}:${$('#stats-end-date').value}` : state.statsPeriod;
+    return ensurePageData(`stats:${range}`, () => loadStatistics(state.statsPeriod), 15000);
+  }
+}
 async function startSession(user) {
-  state.user = user; state.studentDate = today(); state.dashboardStudentId = null; displayApp();
+  state.user = user; state.studentDate = today(); state.dashboardStudentId = null; state.studentDashboardCache.clear(); state.pageLoads.clear(); state.pageLoadedAt.clear(); state.studentLoadController?.abort(); state.studentLoadController = null; displayApp();
   const student = user.role === 'student';
   $('#app-shell').classList.toggle('student-mode', student);
   $('#app-shell').classList.toggle('parent-mode', !student);
@@ -309,10 +466,25 @@ async function startSession(user) {
   $$('.admin-only').forEach(element => element.classList.toggle('hidden', user.role !== 'admin'));
   $('#students-page-title').textContent = user.role === 'admin' ? '全部学生' : '我的孩子';
   $('#stats .eyebrow').textContent = user.role === 'admin' ? '全部学生' : '我的孩子';
-  $('#session-role').innerHTML = `${icon(student ? 'graduation-cap' : user.role === 'admin' ? 'shield-check' : 'users-round')}${student ? '学生端' : user.role === 'admin' ? '管理员端' : '家长端'}`;
+  $('#session-role').innerHTML = `${icon(student ? 'graduation-cap' : user.role === 'admin' ? 'shield-check' : 'users-round')}<span class="role-label">${student ? '学生端' : user.role === 'admin' ? '管理员端' : '家长端'}</span>`;
   $('.main-content').style.marginLeft = student && innerWidth >= 768 ? '96px' : !student && innerWidth >= 768 ? '216px' : '0';
   $('.bottom-nav').style.display = student && innerWidth < 768 ? 'grid' : 'none';
-  if (student) { await Promise.all([loadStudent(), loadStudentTaskList()]); setStudentPage('today'); } else { await loadParent(); if (user.role === 'admin') await loadParents(); await loadStudents(); await loadCategories(); await loadReviews(); state.taskDate = today(); state.taskStudentId = state.parent?.selectedStudentId || activeStudents()[0]?.id || 'all'; setParentPage('overview'); }
+  if (student) {
+    setStudentPage('today');
+    await loadStudent();
+    state.pageLoadedAt.set(`student-dashboard:${state.studentDate}`, Date.now());
+    loadInBackground(`student-tasks:${state.studentTaskFilter}`, loadStudentTaskList);
+  } else {
+    setParentPage('overview');
+    await loadParent();
+    state.pageLoadedAt.set('overview:default', Date.now());
+    state.taskDate = today(); state.taskStudentId = state.parent?.selectedStudentId || 'all';
+    loadInBackground('students', loadStudents);
+    loadInBackground('categories', loadCategories);
+    loadInBackground('reviews', loadReviews, 15000);
+    if (user.role === 'admin') loadInBackground('parents', loadParents);
+    ensurePageData('categories', loadCategories).then(() => loadInBackground('templates', loadTaskTemplates)).catch(error => showToast(error.message));
+  }
   refreshIcons();
   if (user.mustChangePassword) $('#password-dialog').showModal();
 }
@@ -322,14 +494,46 @@ function taskResourceMarkup(task) {
   if (task.resourceKind === 'video') return `<section class="task-resource-section"><h3>任务资料</h3><button class="task-resource-card" data-preview-task-resource><span class="resource-file-icon">▶</span><span><b>${escapeHtml(task.resourceName)}</b><small>点击播放视频</small></span></button></section>`;
   return `<section class="task-resource-section"><h3>任务资料</h3><a class="task-resource-card" href="${task.resourceData}" download="${escapeHtml(task.resourceName)}"><span class="resource-file-icon">⇩</span><span><b>${escapeHtml(task.resourceName)}</b><small>点击下载并查阅文件</small></span></a></section>`;
 }
+function syncStudentTask(task) {
+  const dayIndex = state.tasks.findIndex(item => item.id === task.id); if (dayIndex >= 0) state.tasks[dayIndex] = task;
+  const listIndex = state.studentListTasks.findIndex(item => item.id === task.id); if (listIndex >= 0) state.studentListTasks[listIndex] = task;
+  if (dayIndex >= 0) renderStudent({ ...state.student, tasks: state.tasks });
+  if (listIndex >= 0) renderStudentTaskList();
+}
+function taskDetailStatus(task) { return (statusMeta[task.status] || statusMeta.not_started)[1]; }
+function taskDetailFacts(task, includeStudent = false) {
+  return `<div class="review-task-details task-detail-facts">${includeStudent ? `<p><b>学生</b>${escapeHtml(task.studentName || '未知学生')}</p>` : ''}<p><b>任务日期</b>${escapeHtml(task.date)}</p><p><b>当前状态</b>${escapeHtml(taskDetailStatus(task))}</p><p><b>预计时长</b>${task.duration || 0} 分钟</p><p><b>奖励星星</b>${task.stars || 0} 颗</p><p><b>任务要求</b>${escapeHtml(task.detail)}</p></div>`;
+}
+function taskFeedbackEvidence(task) {
+  if (!task.hasFeedback) return '';
+  const media = task.feedbackData ? `<button class="review-evidence" data-preview-parent-feedback>${task.feedbackKind === 'video' ? '<span class="video-placeholder">▶</span>' : `<img src="${task.feedbackData}" alt="学生上传的任务反馈" />`}<b>查看学生提交的${task.feedbackKind === 'video' ? '视频' : '图片'}</b></button>` : '';
+  return `<section class="task-detail-feedback"><h3>学生反馈</h3>${media}${task.feedbackNote ? `<p class="feedback-note">${escapeHtml(task.feedbackNote)}</p>` : ''}</section>`;
+}
+async function openStudentTaskDetail(taskId) {
+  try {
+    const task = (await api(`/api/student/tasks/${taskId}`)).task;
+    syncStudentTask(task); state.activeTaskDetail = task;
+    const canWork = ['not_started', 'in_progress', 'needs_more'].includes(task.status);
+    const [, , action] = statusMeta[task.status] || statusMeta.not_started;
+    const resultNote = task.status === 'completed' && task.encouragement ? `<p class="feedback-note"><b>家长鼓励</b>${escapeHtml(task.encouragement)}</p>` : '';
+    $('#task-detail-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(task.icon)} ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2>${taskDetailFacts(task)}${taskResourceMarkup(task)}${resultNote}<div class="modal-actions"><button class="secondary-button dialog-cancel">关闭</button>${canWork ? `<button class="primary-button" data-start-task="${task.id}">${action}</button>` : ''}</div></div>`;
+    $('#task-detail-dialog').showModal(); refreshIcons();
+  } catch (err) { showToast(err.message); }
+}
+async function openParentTaskDetail(taskId) {
+  try {
+    const task = (await api(`/api/parent/tasks/${taskId}`)).task;
+    state.activeTaskDetail = task;
+    const resultNote = task.encouragement ? `<p class="feedback-note"><b>家长反馈</b>${escapeHtml(task.encouragement)}</p>` : '';
+    $('#task-detail-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(task.icon)} ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2>${taskDetailFacts(task, true)}${taskResourceMarkup(task)}${taskFeedbackEvidence(task)}${resultNote}<div class="modal-actions"><button class="secondary-button dialog-cancel">关闭</button>${task.status === 'pending_review' ? `<button class="primary-button" data-review="${task.id}">进入审核</button>` : ''}</div></div>`;
+    $('#task-detail-dialog').showModal(); refreshIcons();
+  } catch (err) { showToast(err.message); }
+}
 async function openTask(task) {
   try {
     if (task.status === 'not_started') task = (await api(`/api/student/tasks/${task.id}/draft`, { method: 'PATCH', body: '{}' })).task;
     else task = (await api(`/api/student/tasks/${task.id}`)).task;
-    const dayIndex = state.tasks.findIndex(item => item.id === task.id); if (dayIndex >= 0) state.tasks[dayIndex] = task;
-    const listIndex = state.studentListTasks.findIndex(item => item.id === task.id); if (listIndex >= 0) state.studentListTasks[listIndex] = task;
-    if (dayIndex >= 0) renderStudent({ ...state.student, tasks: state.tasks });
-    if (listIndex >= 0) renderStudentTaskList();
+    syncStudentTask(task);
   } catch (err) { showToast(err.message); return; }
   state.activeTaskDetail = task;
   const [, , action] = statusMeta[task.status] || statusMeta.not_started;
@@ -339,7 +543,7 @@ async function openTask(task) {
   const savedPreview = task.feedbackData ? (task.feedbackKind === 'video' ? `<video src="${task.feedbackData}" controls></video><b>${escapeHtml(task.feedbackName || '已保存的视频')}</b>` : `<img src="${task.feedbackData}" alt="已保存的反馈图片" /><b>${escapeHtml(task.feedbackName || '已保存的图片')}</b>`) : '<span>尚未选择反馈文件</span>';
   const feedback = task.feedbackType === 'none' ? `<div class="no-feedback-note">此任务不需要上传反馈，完成后直接提交即可。</div><label class="task-note-label">补充说明<textarea id="task-feedback-note" maxlength="300" placeholder="可以写下完成过程或心得（选填）">${escapeHtml(task.feedbackNote)}</textarea></label>` : `<div class="task-feedback-upload"><input id="task-feedback-file" type="file" accept="${accept}" hidden /><button type="button" class="secondary-button" id="pick-task-feedback">＋ 选择图片或视频</button><div id="task-feedback-preview">${savedPreview}</div><label>补充说明<textarea id="task-feedback-note" maxlength="300" placeholder="可以写下完成过程或心得（选填）">${escapeHtml(task.feedbackNote)}</textarea></label></div>`;
   $('#task-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(task.icon)} ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2><p>${escapeHtml(task.detail)}</p>${taskResourceMarkup(task)}<div class="modal-summary"><p>预计 ${task.duration || 15} 分钟</p><p>完成后可获得 ⭐ ${task.stars} 颗星星</p><p>${task.feedbackType === 'none' ? '不需要提交反馈' : '需要提交学习反馈'}</p></div>${readonly ? `<div class="no-feedback-note">${task.status === 'completed' ? '该任务已经完成。' : '反馈已提交，正在等待家长审核。'}</div><div class="modal-actions"><button class="primary-button" id="modal-close-done">知道啦</button></div>` : `${feedback}<p class="login-error" id="task-submit-error"></p><div class="modal-actions"><button class="secondary-button" id="save-draft">保存草稿</button><button class="primary-button" data-submit-task="${task.id}">${action === '补充反馈' ? '确认补充' : '确认提交'}</button></div>`}</div>`;
-  $('#task-dialog').showModal();
+  $('#task-detail-dialog').close(); $('#task-dialog').showModal();
 }
 function openReview(task) {
   const feedback = task.feedbackData
@@ -424,12 +628,14 @@ function openStudentActions(student, anchor) {
 $('#login-form').addEventListener('submit', async event => {
   event.preventDefault(); const error = $('#login-error'); error.textContent = '';
   const submit = $('.login-submit'); submit.disabled = true; submit.textContent = '正在验证…';
-  try { const result = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ role: state.role, username: $('#username').value, password: $('#password').value, captchaId: state.captchaId, captcha: $('#captcha').value }) }); await startSession(result.user); }
+  try { const result = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ role: state.role, username: $('#username').value, password: $('#password').value, captchaId: state.captchaId, captcha: $('#captcha').value, rememberMe: matchMedia('(min-width: 768px)').matches }) }); await startSession(result.user); }
   catch (err) { error.textContent = err.message; await refreshCaptcha(); }
   finally { submit.disabled = false; submit.innerHTML = `<span id="login-submit-label">${state.role === 'student' ? '进入我的任务' : '进入家长首页'}</span> <b>→</b>`; }
 });
 document.addEventListener('click', async event => {
   if (!$('#student-action-menu').hidden && !event.target.closest('#student-action-menu') && !event.target.closest('[data-student-actions]')) closeStudentActionMenu();
+  if (event.target.closest('#parent-mobile-menu-button')) { const open = !$('#app-shell').classList.contains('mobile-menu-open'); $('#app-shell').classList.toggle('mobile-menu-open', open); $('#parent-mobile-menu-button').setAttribute('aria-expanded', String(open)); $('#parent-sidebar-backdrop').hidden = !open; return; }
+  if (event.target.closest('#parent-sidebar-backdrop')) { closeParentMobileMenu(); return; }
   const loginRole = event.target.closest('[data-login-role]'); if (loginRole) { setLoginRole(loginRole.dataset.loginRole); return; }
   if (event.target.closest('#refresh-captcha')) { await refreshCaptcha(); return; }
   if (event.target.closest('#logout-button')) { $('#logout-dialog').showModal(); return; }
@@ -437,19 +643,34 @@ document.addEventListener('click', async event => {
   const dialogClose = event.target.closest('.modal-close, .dialog-cancel'); if (dialogClose) { dialogClose.closest('dialog')?.close(); return; }
   if (event.target.id === 'modal-close-done') { closeDialogs(); return; }
   if (event.target.closest('.feedback-option')) { $$('.feedback-option').forEach(item => item.classList.remove('selected')); event.target.closest('.feedback-option').classList.add('selected'); return; }
-  const studentNav = event.target.closest('[data-page]'); if (studentNav && state.user?.role === 'student') { if (studentNav.dataset.page === 'tasks') await loadStudentTaskList(); setStudentPage(studentNav.dataset.page); return; }
-  const parentNav = event.target.closest('[data-parent-page]'); if (parentNav && state.user && state.user.role !== 'student') { if (parentNav.dataset.parentPage === 'parents') { if (state.user.role !== 'admin') return; await loadParents(); } if (parentNav.dataset.parentPage === 'students') await loadStudents(); if (parentNav.dataset.parentPage === 'assign') await prepareTaskManager(); if (parentNav.dataset.parentPage === 'categories') await loadCategories(); if (parentNav.dataset.parentPage === 'review') await loadReviews(); if (parentNav.dataset.parentPage === 'stats') { $('#stats-start-date').value ||= startOfWeek(today()); $('#stats-end-date').value ||= today(); await loadStatistics(state.statsPeriod); } setParentPage(parentNav.dataset.parentPage); return; }
+  const studentNav = event.target.closest('[data-page]'); if (studentNav && state.user?.role === 'student') { const page = studentNav.dataset.page; setStudentPage(page); if (page === 'today') loadInBackground(`student-dashboard:${state.studentDate}`, () => loadStudent()); if (page === 'tasks') loadInBackground(`student-tasks:${state.studentTaskFilter}`, loadStudentTaskList); return; }
+  const parentNav = event.target.closest('[data-parent-page]'); if (parentNav && state.user && state.user.role !== 'student') { const page = parentNav.dataset.parentPage; if ((page === 'parents' || page === 'categories') && state.user.role !== 'admin') return; setParentPage(page); closeParentMobileMenu(); loadParentPageData(page).catch(error => showToast(error.message)); return; }
   if (event.target.id === 'open-assignment') { openAssignmentEditor(); return; }
+  if (event.target.closest('#open-template-assignment')) { await openTemplateAssignment(); return; }
+  if (event.target.closest('#add-task-template')) { openTemplateEditor(); return; }
+  if (event.target.closest('#cancel-template-editor, #cancel-template-form')) { await loadTaskTemplates(); setParentPage('templates'); return; }
+  if (event.target.closest('#cancel-template-assignment')) { await prepareTaskManager(); setParentPage('assign'); return; }
+  const editTemplate = event.target.closest('[data-edit-template]'); if (editTemplate) { const template = state.templates.find(item => item.id === Number(editTemplate.dataset.editTemplate)); if (template?.isOwner) openTemplateEditor(template); return; }
+  const deleteTemplate = event.target.closest('[data-delete-template]'); if (deleteTemplate) { state.pendingTemplateId = Number(deleteTemplate.dataset.deleteTemplate); $('#template-delete-dialog').showModal(); return; }
+  if (event.target.id === 'confirm-template-delete') { try { await api(`/api/parent/task-templates/${state.pendingTemplateId}`, { method: 'DELETE' }); $('#template-delete-dialog').close(); await loadTaskTemplates(); showToast('任务模板已删除'); } catch (err) { showToast(err.message); } return; }
+  if (event.target.closest('#pick-template-resource')) { $('#template-resource-file').click(); return; }
+  if (event.target.closest('#clear-template-resource')) { state.templateResourceData = ''; state.templateResourceName = ''; state.templateResourceExisting = false; state.removeTemplateResource = true; $('#template-resource-file').value = ''; renderTemplateResourcePreview(); return; }
+  const templateDateMode = event.target.closest('[data-template-date-mode]'); if (templateDateMode) { setTemplateDateMode(templateDateMode.dataset.templateDateMode); return; }
+  if (event.target.closest('#template-assignment-next')) { state.selectedTemplateIds = $$('#template-picker-groups input:checked').map(input => Number(input.value)); if (!state.selectedTemplateIds.length) { showToast('请至少选择一个任务模板'); return; } showTemplateAssignmentStep(2); return; }
+  if (event.target.closest('#template-assignment-back')) { state.selectedTemplateIds = $$('#template-picker-groups input:checked').map(input => Number(input.value)); showTemplateAssignmentStep(1); return; }
   if (event.target.id === 'pick-assignment-resource') { $('#assignment-resource-file').click(); return; }
-  if (event.target.id === 'clear-assignment-resource') { state.taskResourceData = ''; state.taskResourceName = ''; $('#assignment-resource-file').value = ''; $('#assignment-resource-preview').hidden = true; $('#assignment-resource-preview').innerHTML = ''; return; }
+  if (event.target.id === 'clear-assignment-resource' || event.target.closest('#clear-assignment-resource')) { state.taskResourceData = ''; state.taskResourceName = ''; state.taskResourceExisting = false; state.removeTaskResource = true; $('#assignment-resource-file').value = ''; renderAssignmentResourcePreview(); return; }
   if (event.target.id === 'back-to-task-list' || event.target.id === 'cancel-assignment') { await prepareTaskManager(); setParentPage('assign'); return; }
   const taskDate = event.target.closest('[data-task-date]'); if (taskDate) { state.taskDate = taskDate.dataset.taskDate; renderTaskWeek(); await loadParentTasks(); return; }
-  if (event.target.id === 'task-week-prev' || event.target.id === 'task-week-next') { state.taskDate = addDays(state.taskDate, event.target.id === 'task-week-prev' ? -7 : 7); renderTaskWeek(); await loadParentTasks(); return; }
+  const taskWeekArrow = event.target.closest('#task-week-prev, #task-week-next'); if (taskWeekArrow) { state.taskDate = addDays(state.taskDate, taskWeekArrow.id === 'task-week-prev' ? -7 : 7); renderTaskWeek(); await loadParentTasks(); return; }
+  if (event.target.closest('#task-week-today')) { state.taskDate = today(); renderTaskWeek(); await loadParentTasks(); return; }
   const studentDate = event.target.closest('[data-student-date]'); if (studentDate) { await loadStudent(studentDate.dataset.studentDate); return; }
-  if (event.target.id === 'student-week-prev' || event.target.id === 'student-week-next') { await loadStudent(addDays(state.studentDate, event.target.id === 'student-week-prev' ? -7 : 7)); return; }
+  const studentWeekArrow = event.target.closest('#student-week-prev, #student-week-next'); if (studentWeekArrow) { await loadStudent(addDays(state.studentDate, studentWeekArrow.id === 'student-week-prev' ? -7 : 7)); return; }
+  if (event.target.closest('#student-week-today')) { await loadStudent(today()); return; }
   const studentTaskFilter = event.target.closest('[data-student-task-filter]'); if (studentTaskFilter) { await loadStudentTaskList(studentTaskFilter.dataset.studentTaskFilter); return; }
   const dateMode = event.target.closest('[data-assignment-date-mode]'); if (dateMode) { setAssignmentDateMode(dateMode.dataset.assignmentDateMode); return; }
   const statsPeriod = event.target.closest('[data-stats-period]'); if (statsPeriod) { const period = statsPeriod.dataset.statsPeriod; state.statsPeriod = period; $('#custom-stats-range').hidden = period !== 'custom'; if (period !== 'custom') await loadStatistics(period); else $$('[data-stats-period]').forEach(button => button.classList.toggle('selected', button === statsPeriod)); return; }
+  const editTask = event.target.closest('[data-edit-parent-task]'); if (editTask) { const task = state.parentTasks.find(item => item.id === Number(editTask.dataset.editParentTask)); if (task) openAssignmentEditor(task); return; }
   const deleteTask = event.target.closest('[data-delete-parent-task]'); if (deleteTask) { state.pendingTaskId = Number(deleteTask.dataset.deleteParentTask); $('#task-delete-dialog').showModal(); return; }
   if (event.target.id === 'confirm-task-delete') { try { await api(`/api/parent/tasks/${state.pendingTaskId}`, { method: 'DELETE' }); $('#task-delete-dialog').close(); await loadParentTasks(); showToast('已删除当天任务'); } catch (err) { showToast(err.message); } return; }
   if (event.target.id === 'add-category') { openCategoryForm(); return; }
@@ -473,22 +694,38 @@ document.addEventListener('click', async event => {
   if (event.target.id === 'confirm-unlink-student') { try { await api(`/api/parent/students/${state.activeStudentId}/parents/${state.pendingUnlinkParentId}`, { method: 'DELETE' }); $('#unlink-student-dialog').close(); state.dashboardStudentId = null; await loadStudents(); await loadParent(); showToast('学生与家长已解绑'); } catch (err) { showToast(err.message); } return; }
   if (event.target.closest('#toggle-student-status-action')) { const student = state.students.find(item => item.id === state.activeStudentId); closeStudentActionMenu(); if (!student) return; state.pendingStudentStatus = !student.active; $('#student-status-title').textContent = state.pendingStudentStatus ? `确认启用${student.display_name}的账号？` : `确认禁用${student.display_name}的账号？`; $('#student-status-description').textContent = state.pendingStudentStatus ? '启用后，该学生可以重新登录系统。' : '禁用后，该学生将立即退出并无法登录系统。'; $('#confirm-student-status').textContent = state.pendingStudentStatus ? '确认启用' : '确认禁用'; $('#confirm-student-status').classList.toggle('danger-button', !state.pendingStudentStatus); $('#student-status-dialog').showModal(); return; }
   if (event.target.id === 'confirm-student-status') { const active = state.pendingStudentStatus; try { await api(`/api/parent/students/${state.activeStudentId}/status`, { method: 'PATCH', body: JSON.stringify({ active }) }); $('#student-status-dialog').close(); if (!active && state.dashboardStudentId === state.activeStudentId) state.dashboardStudentId = null; await loadStudents(); await loadParent(); setParentPage('students'); showToast(active ? '学生账号已启用' : '学生账号已禁用'); } catch (err) { showToast(err.message); } return; }
-  const taskElement = event.target.closest('[data-task]'); if (taskElement && state.user?.role === 'student') { const taskId = Number(taskElement.dataset.task); const task = state.tasks.find(item => item.id === taskId) || state.studentListTasks.find(item => item.id === taskId); if (task) await openTask(task); return; }
+  const startTask = event.target.closest('[data-start-task]'); if (startTask && state.user?.role === 'student') { const taskId = Number(startTask.dataset.startTask); const task = state.tasks.find(item => item.id === taskId) || state.studentListTasks.find(item => item.id === taskId) || { id: taskId, status: 'in_progress' }; await openTask(task); return; }
+  const taskElement = event.target.closest('[data-task]'); if (taskElement && state.user?.role === 'student' && !event.target.closest('button,a,input,select,textarea')) { await openStudentTaskDetail(Number(taskElement.dataset.task)); return; }
+  const parentTaskElement = event.target.closest('[data-parent-task]'); if (parentTaskElement && state.user && state.user.role !== 'student' && !event.target.closest('button,a,input,select,textarea')) { await openParentTaskDetail(Number(parentTaskElement.dataset.parentTask)); return; }
   if (event.target.closest('[data-preview-task-resource]')) { const task = state.activeTaskDetail; if (!task?.resourceData) return; $('#feedback-preview-content').innerHTML = task.resourceKind === 'video' ? `<video src="${task.resourceData}" controls autoplay></video>` : `<img src="${task.resourceData}" alt="任务资料大图" />`; $('#feedback-preview-dialog').showModal(); return; }
   if (event.target.id === 'pick-task-feedback') { $('#task-feedback-file')?.click(); return; }
+  if (event.target.closest('[data-preview-parent-feedback]')) { const task = state.activeTaskDetail; if (!task?.feedbackData) return; $('#feedback-preview-content').innerHTML = task.feedbackKind === 'video' ? `<video src="${task.feedbackData}" controls autoplay></video>` : `<img src="${task.feedbackData}" alt="学生上传的任务反馈大图" />`; $('#feedback-preview-dialog').showModal(); return; }
   const previewFeedback = event.target.closest('[data-preview-feedback]'); if (previewFeedback) { const task = state.reviews.find(item => item.id === Number(previewFeedback.dataset.previewFeedback)); if (!task?.feedbackData) return; $('#feedback-preview-content').innerHTML = task.feedbackKind === 'video' ? `<video src="${task.feedbackData}" controls autoplay></video>` : `<img src="${task.feedbackData}" alt="学生上传的任务反馈大图" />`; $('#feedback-preview-dialog').showModal(); return; }
-  const review = event.target.closest('[data-review]'); if (review) { const taskId = Number(review.dataset.review); let task = state.reviews.find(item => item.id === taskId); try { if (!task || !Object.hasOwn(task, 'feedbackData')) { const data = await api(`/api/parent/tasks/${taskId}/review`); task = data.task; const index = state.reviews.findIndex(item => item.id === taskId); if (index >= 0) state.reviews[index] = task; else state.reviews.push(task); } openReview(task); } catch (err) { showToast(err.message); } return; }
-  const submitTask = event.target.closest('[data-submit-task]'); if (submitTask) { const error = $('#task-submit-error'); if (error) error.textContent = ''; try { await api(`/api/student/tasks/${submitTask.dataset.submitTask}/submit`, { method: 'POST', body: JSON.stringify({ feedbackData: state.taskFeedbackData, feedbackName: state.taskFeedbackName, feedbackNote: $('#task-feedback-note')?.value || '' }) }); closeDialogs(); await Promise.all([loadStudent(state.studentDate), loadStudentTaskList()]); showToast('任务已提交'); } catch (err) { if (error) error.textContent = err.message; else showToast(err.message); } return; }
+  const review = event.target.closest('[data-review]'); if (review) { const taskId = Number(review.dataset.review); let task = state.reviews.find(item => item.id === taskId); try { if (!task || !Object.hasOwn(task, 'feedbackData')) { const data = await api(`/api/parent/tasks/${taskId}/review`); task = data.task; const index = state.reviews.findIndex(item => item.id === taskId); if (index >= 0) state.reviews[index] = task; else state.reviews.push(task); } $('#task-detail-dialog').close(); openReview(task); } catch (err) { showToast(err.message); } return; }
+  const submitTask = event.target.closest('[data-submit-task]'); if (submitTask) { const error = $('#task-submit-error'); if (error) error.textContent = ''; try { await api(`/api/student/tasks/${submitTask.dataset.submitTask}/submit`, { method: 'POST', body: JSON.stringify({ feedbackData: state.taskFeedbackData, feedbackName: state.taskFeedbackName, feedbackNote: $('#task-feedback-note')?.value || '' }) }); invalidateStudentDashboardCache(); closeDialogs(); await Promise.all([loadStudent(state.studentDate), loadStudentTaskList()]); showToast('任务已提交'); } catch (err) { if (error) error.textContent = err.message; else showToast(err.message); } return; }
   const approve = event.target.closest('[data-approve]'); if (approve) { const error = $('#review-error'); try { await api(`/api/parent/tasks/${approve.dataset.approve}/review`, { method: 'POST', body: JSON.stringify({ action: 'approve', stars: Number($('#review-stars').value), message: $('#review-message').value }) }); closeDialogs(); await loadParent(); await loadReviews(); showToast('审核通过，星星已发放'); } catch (err) { error.textContent = err.message; } return; }
   const more = event.target.closest('[data-more]'); if (more) { const error = $('#review-error'); try { await api(`/api/parent/tasks/${more.dataset.more}/review`, { method: 'POST', body: JSON.stringify({ action: 'needs_more', message: $('#review-message').value || '请再补充一点学习反馈。' }) }); closeDialogs(); await loadParent(); await loadReviews(); showToast('已通知学生补充反馈'); } catch (err) { error.textContent = err.message; } return; }
-  if (event.target.id === 'save-draft') { const error = $('#task-submit-error'); if (error) error.textContent = ''; try { await api(`/api/student/tasks/${state.activeTaskDetail.id}/draft`, { method: 'PATCH', body: JSON.stringify({ feedbackData: state.taskFeedbackData, feedbackName: state.taskFeedbackName, feedbackNote: $('#task-feedback-note')?.value || '' }) }); closeDialogs(); await Promise.all([loadStudent(state.studentDate), loadStudentTaskList()]); showToast('草稿已保存，任务状态已更新'); } catch (err) { if (error) error.textContent = err.message; else showToast(err.message); } }
+  if (event.target.id === 'save-draft') { const error = $('#task-submit-error'); if (error) error.textContent = ''; try { await api(`/api/student/tasks/${state.activeTaskDetail.id}/draft`, { method: 'PATCH', body: JSON.stringify({ feedbackData: state.taskFeedbackData, feedbackName: state.taskFeedbackName, feedbackNote: $('#task-feedback-note')?.value || '' }) }); invalidateStudentDashboardCache(); closeDialogs(); await Promise.all([loadStudent(state.studentDate), loadStudentTaskList()]); showToast('草稿已保存，任务状态已更新'); } catch (err) { if (error) error.textContent = err.message; else showToast(err.message); } }
+});
+document.addEventListener('keydown', event => {
+  if (!['Enter', ' '].includes(event.key) || !event.target.matches('[data-task], [data-parent-task]')) return;
+  event.preventDefault(); event.target.click();
 });
 document.addEventListener('change', async event => {
   if (event.target.id === 'dashboard-student-select') { await loadParent(Number(event.target.value)); return; }
   if (event.target.id === 'assignment-category') { renderAssignmentCategoryIcon(); return; }
+  if (event.target.id === 'template-category-filter') { state.templateCategoryFilter = event.target.value; renderTemplateGroups(); return; }
+  if (event.target.id === 'template-category') { renderTemplateCategoryIcon(); return; }
+  if (event.target.closest('#template-picker-groups') && event.target.matches('input[type="checkbox"]')) { state.selectedTemplateIds = $$('#template-picker-groups input:checked').map(input => Number(input.value)); $('#selected-template-summary').textContent = state.selectedTemplateIds.length ? `已选择 ${state.selectedTemplateIds.length} 个模板` : '尚未选择模板'; return; }
+  if (event.target.id === 'template-resource-file') {
+    const file = event.target.files[0]; if (!file) return; const preview = $('#template-resource-preview'); const error = $('#template-error'); error.textContent = '';
+    try { state.templateResourceData = await prepareTaskResource(file); state.templateResourceName = file.name; state.templateResourceExisting = false; state.removeTemplateResource = false; preview.hidden = false; preview.innerHTML = `${file.type.startsWith('image/') ? `<img src="${state.templateResourceData}" alt="任务资料预览" />` : file.type.startsWith('video/') ? `<video src="${state.templateResourceData}" controls></video>` : `<span class="resource-file-icon">${icon('file')}</span>`}<div><b>${escapeHtml(file.name)}</b><small>${Math.ceil(file.size / 1024)} KB</small></div><button type="button" class="icon-button" id="clear-template-resource" aria-label="移除任务资料" title="移除">${icon('x')}</button>`; refreshIcons(); }
+    catch (err) { state.templateResourceData = ''; state.templateResourceName = ''; event.target.value = ''; preview.hidden = true; preview.innerHTML = ''; error.textContent = err.message; }
+    return;
+  }
   if (event.target.id === 'assignment-resource-file') {
     const file = event.target.files[0]; if (!file) return; const preview = $('#assignment-resource-preview'); const error = $('#assignment-error'); error.textContent = '';
-    try { state.taskResourceData = await prepareTaskResource(file); state.taskResourceName = file.name; preview.hidden = false; preview.innerHTML = `${file.type.startsWith('image/') ? `<img src="${state.taskResourceData}" alt="任务资料预览" />` : file.type.startsWith('video/') ? `<video src="${state.taskResourceData}" controls></video>` : '<span class="resource-file-icon">▧</span>'}<div><b>${escapeHtml(file.name)}</b><small>${Math.ceil(file.size / 1024)} KB</small></div><button type="button" class="icon-button" id="clear-assignment-resource" aria-label="移除任务资料" title="移除">×</button>`; }
+    try { state.taskResourceData = await prepareTaskResource(file); state.taskResourceName = file.name; state.taskResourceExisting = false; state.removeTaskResource = false; preview.hidden = false; preview.innerHTML = `${file.type.startsWith('image/') ? `<img src="${state.taskResourceData}" alt="任务资料预览" />` : file.type.startsWith('video/') ? `<video src="${state.taskResourceData}" controls></video>` : `<span class="resource-file-icon">${icon('file')}</span>`}<div><b>${escapeHtml(file.name)}</b><small>${Math.ceil(file.size / 1024)} KB</small></div><button type="button" class="icon-button" id="clear-assignment-resource" aria-label="移除任务资料" title="移除">${icon('x')}</button>`; refreshIcons(); }
     catch (err) { state.taskResourceData = ''; state.taskResourceName = ''; event.target.value = ''; preview.hidden = true; preview.innerHTML = ''; error.textContent = err.message; }
     return;
   }
@@ -505,16 +742,42 @@ $('#assignment-form').addEventListener('submit', async event => {
   const form = event.currentTarget;
   const studentIds = $$('#assignment-students input:checked').map(input => Number(input.value));
   if (!studentIds.length) { error.textContent = '请至少选择一名学生'; return; }
+  if (state.editingTaskId && studentIds.length !== 1) { error.textContent = '修改任务时只能选择一名学生'; return; }
   const startDate = state.assignmentDateMode === 'single' ? $('#assignment-single-date').value : $('#assignment-start-date').value;
   const endDate = state.assignmentDateMode === 'single' ? startDate : $('#assignment-end-date').value;
   if (state.assignmentDateMode === 'range' && dateSpanDays(startDate, endDate) > 30) { error.textContent = '连续日期最多可选择 30 天'; return; }
   try {
-    const result = await api('/api/parent/tasks', { method: 'POST', body: JSON.stringify({ studentIds, title: $('#assignment-title').value, detail: $('#assignment-detail').value, categoryId: Number($('#assignment-category').value), duration: Number($('#assignment-duration').value), stars: Number($('#assignment-stars').value), feedbackType: $('#assignment-feedback').value, needsReview: $('#assignment-review').checked, startDate, endDate, resourceData: state.taskResourceData, resourceName: state.taskResourceName }) });
-    form.reset(); state.taskResourceData = ''; state.taskResourceName = ''; $('#assignment-resource-preview').hidden = true; $('#assignment-resource-preview').innerHTML = ''; state.taskDate = startDate; state.taskStudentId = studentIds.length === 1 ? studentIds[0] : 'all'; await loadParent(); await prepareTaskManager(); setParentPage('assign'); showToast(`已创建 ${result.count} 条任务`);
+    const payload = { studentIds, studentId: studentIds[0], title: $('#assignment-title').value, detail: $('#assignment-detail').value, categoryId: Number($('#assignment-category').value), duration: Number($('#assignment-duration').value), stars: Number($('#assignment-stars').value), feedbackType: $('#assignment-feedback').value, needsReview: $('#assignment-review').checked, startDate, endDate, date: startDate, resourceData: state.taskResourceData, resourceName: state.taskResourceName, removeResource: state.removeTaskResource };
+    const editing = state.editingTaskId;
+    const result = await api(editing ? `/api/parent/tasks/${editing}` : '/api/parent/tasks', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+    form.reset(); state.taskResourceData = ''; state.taskResourceName = ''; state.taskResourceExisting = false; state.removeTaskResource = false; state.editingTaskId = null; $('#assignment-resource-preview').hidden = true; $('#assignment-resource-preview').innerHTML = ''; state.taskDate = startDate; state.taskStudentId = studentIds.length === 1 ? studentIds[0] : 'all'; await loadParent(); await prepareTaskManager(); setParentPage('assign'); showToast(editing ? '任务已更新' : `已创建 ${result.count} 条任务`);
   } catch (err) { error.textContent = err.message; }
 });
 $('#task-student-filter').addEventListener('change', async event => { state.taskStudentId = event.target.value === 'all' ? 'all' : Number(event.target.value); await loadParentTasks(); });
+$('#assignment-students').addEventListener('change', event => { if (!state.editingTaskId || !event.target.matches('input') || !event.target.checked) return; $$('#assignment-students input').forEach(input => { if (input !== event.target) input.checked = false; }); });
 $('#assignment-start-date').addEventListener('change', syncAssignmentRangeLimit);
+$('#template-start-date').addEventListener('change', syncTemplateRangeLimit);
+$('#template-form').addEventListener('submit', async event => {
+  event.preventDefault(); const error = $('#template-error'); error.textContent = '';
+  const editing = state.editingTemplateId;
+  const payload = { title: $('#template-title').value, detail: $('#template-detail').value, categoryId: Number($('#template-category').value), duration: Number($('#template-duration').value), stars: Number($('#template-stars').value), feedbackType: $('#template-feedback').value, needsReview: $('#template-review').checked, isPublic: $('#template-public').checked, resourceData: state.templateResourceData, resourceName: state.templateResourceName, removeResource: state.removeTemplateResource };
+  try {
+    await api(editing ? `/api/parent/task-templates/${editing}` : '/api/parent/task-templates', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+    event.currentTarget.reset(); state.editingTemplateId = null; state.templateResourceData = ''; state.templateResourceName = ''; state.templateResourceExisting = false; state.removeTemplateResource = false; await loadTaskTemplates(); setParentPage('templates'); showToast(editing ? '任务模板已更新' : '任务模板已创建');
+  } catch (err) { error.textContent = err.message; }
+});
+$('#template-assign-form').addEventListener('submit', async event => {
+  event.preventDefault(); const error = $('#template-assignment-error'); error.textContent = '';
+  const studentIds = $$('#template-assignment-students input:checked').map(input => Number(input.value));
+  if (!studentIds.length) { error.textContent = '请至少选择一名学生'; return; }
+  const startDate = state.templateDateMode === 'single' ? $('#template-single-date').value : $('#template-start-date').value;
+  const endDate = state.templateDateMode === 'single' ? startDate : $('#template-end-date').value;
+  if (state.templateDateMode === 'range' && dateSpanDays(startDate, endDate) > 30) { error.textContent = '连续日期最多可选择 30 天'; return; }
+  try {
+    const result = await api('/api/parent/task-templates/assign', { method: 'POST', body: JSON.stringify({ templateIds: state.selectedTemplateIds, studentIds, startDate, endDate }) });
+    state.taskDate = startDate; state.taskStudentId = studentIds.length === 1 ? studentIds[0] : 'all'; state.selectedTemplateIds = []; await loadParent(); await prepareTaskManager(); setParentPage('assign'); showToast(`已分配 ${result.count} 条任务`);
+  } catch (err) { error.textContent = err.message; }
+});
 $('#custom-stats-range').addEventListener('submit', async event => { event.preventDefault(); const errorRange = $('#stats-end-date').value < $('#stats-start-date').value; if (errorRange) { showToast('结束日期不能早于开始日期'); return; } await loadStatistics('custom'); });
 $('#category-form').addEventListener('submit', async event => {
   event.preventDefault(); const error = $('#category-error'); error.textContent = '';
@@ -581,6 +844,7 @@ $('#reset-student-password-form').addEventListener('submit', async event => {
   try { await api(`/api/parent/students/${state.activeStudentId}/reset-password`, { method: 'POST', body: JSON.stringify({ password: $('#reset-student-password').value }) }); $('#reset-student-password-dialog').close(); event.currentTarget.reset(); showToast('学生密码已重置，请通知孩子使用新密码登录'); }
   catch (err) { error.textContent = err.message; }
 });
-window.addEventListener('resize', () => { closeStudentActionMenu(); if (!state.user) return; const student = state.user.role === 'student'; $('.main-content').style.marginLeft = student && innerWidth >= 768 ? '96px' : !student && innerWidth >= 768 ? '216px' : '0'; $('.bottom-nav').style.display = student && innerWidth < 768 ? 'grid' : 'none'; });
+window.addEventListener('resize', () => { closeStudentActionMenu(); if (innerWidth >= 768) closeParentMobileMenu(); if (!state.user) return; const student = state.user.role === 'student'; $('.main-content').style.marginLeft = student && innerWidth >= 768 ? '96px' : !student && innerWidth >= 768 ? '216px' : '0'; $('.bottom-nav').style.display = student && innerWidth < 768 ? 'grid' : 'none'; });
+document.addEventListener('keydown', event => { if (event.key === 'Escape') closeParentMobileMenu(); });
 window.addEventListener('scroll', closeStudentActionMenu, true);
 (async function boot() { refreshIcons(); displayLogin(); try { const result = await api('/api/auth/me'); await startSession(result.user); } catch { await refreshCaptcha(); } })();

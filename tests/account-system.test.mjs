@@ -7,21 +7,28 @@ const avatar = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HA
 async function request(path, { cookie, ...options } = {}) {
   const response = await fetch(`${base}${path}`, { ...options, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...(options.headers || {}) } });
   const body = response.status === 204 ? {} : await response.json();
-  return { response, body, cookie: response.headers.get('set-cookie')?.split(';')[0] };
+  return { response, body, cookie: response.headers.get('set-cookie')?.split(';')[0], setCookie: response.headers.get('set-cookie') || '' };
 }
 
-async function login(username, password, role = 'parent') {
+async function login(username, password, role = 'parent', rememberMe = false) {
   const captcha = await request('/api/auth/captcha');
   const answer = [...captcha.body.svg.matchAll(/<text[^>]*>([^<]+)<\/text>/g)].map(match => match[1]).join('');
-  return request('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password, role, captchaId: captcha.body.id, captcha: answer }) });
+  return request('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password, role, captchaId: captcha.body.id, captcha: answer, rememberMe }) });
 }
 
 test('admin manages parent accounts and parent-student visibility', async () => {
-  const adminLogin = await login('admin', 'admin@2026');
+  const adminLogin = await login('admin', 'admin@2026', 'parent', true);
   assert.equal(adminLogin.response.status, 200);
+  assert.match(adminLogin.setCookie, /Max-Age=2592000/);
   const admin = adminLogin.cookie;
 
   const suffix = Date.now();
+  const categoryCreate = await request('/api/parent/categories', { cookie: admin, method: 'POST', body: JSON.stringify({ name: `测试分类${suffix}`, icon: 'assets/category-icons/science-flask.png' }) });
+  assert.equal(categoryCreate.response.status, 201);
+  const categoryId = categoryCreate.body.category.id;
+  const categoryUpdate = await request(`/api/parent/categories/${categoryId}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ name: `测试分类新${suffix}`, icon: 'assets/category-icons/art-palette.png' }) });
+  assert.equal(categoryUpdate.response.status, 200);
+
   const p1Name = `p1_${suffix}`; const p2Name = `p2_${suffix}`; const studentName = `s_${suffix}`;
   const p1Create = await request('/api/admin/parents', { cookie: admin, method: 'POST', body: JSON.stringify({ displayName: '测试家长甲', username: p1Name, password: 'Parent2026A' }) });
   assert.equal(p1Create.response.status, 201);
@@ -52,6 +59,13 @@ test('admin manages parent accounts and parent-student visibility', async () => 
   assert.equal(forbidden.response.status, 403);
   const p1Students = await request('/api/parent/students', { cookie: p1Login.cookie });
   assert.deepEqual(p1Students.body.students.map(student => student.id), [studentId]);
+  const parentCategories = await request('/api/parent/categories', { cookie: p1Login.cookie });
+  assert.equal(parentCategories.response.status, 200);
+  assert.ok(parentCategories.body.categories.some(category => category.id === categoryId));
+  assert.equal((await request('/api/parent/categories', { cookie: p1Login.cookie, method: 'POST', body: JSON.stringify({ name: `越权新增${suffix}`, icon: 'assets/category-icons/music-note.png' }) })).response.status, 403);
+  assert.equal((await request(`/api/parent/categories/${categoryId}`, { cookie: p1Login.cookie, method: 'PATCH', body: JSON.stringify({ name: `越权修改${suffix}`, icon: 'assets/category-icons/music-note.png' }) })).response.status, 403);
+  assert.equal((await request(`/api/parent/categories/${categoryId}`, { cookie: p1Login.cookie, method: 'DELETE' })).response.status, 403);
+  assert.equal((await request(`/api/parent/categories/${categoryId}`, { cookie: admin, method: 'DELETE' })).response.status, 204);
 
   const unlinked = await request(`/api/parent/students/${studentId}/parents/${p1Id}`, { cookie: p1Login.cookie, method: 'DELETE' });
   assert.equal(unlinked.response.status, 204);

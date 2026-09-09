@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#2f80ed" />
     <title>学习星球</title>
-    <link rel="stylesheet" href="styles.css?v=20260908-ui4" />
+    <link rel="stylesheet" href="styles.css?v=20260909-ui10" />
   </head>
   <body>
     <section class="login-screen" id="login-screen" aria-label="学习星球登录">
@@ -36,11 +36,12 @@
           <img class="brand-logo" src="assets/learning-planet-logo.png" alt="" /><span>学习星球</span>
         </button>
         <div class="role-switch" aria-label="当前使用端">
-          <span class="role active" id="session-role"><i data-lucide="graduation-cap"></i>学生端</span>
+          <span class="role active" id="session-role"><i data-lucide="graduation-cap"></i><span class="role-label">学生端</span></span>
         </div>
         <div class="top-actions">
+          <button class="parent-mobile-menu-button" id="parent-mobile-menu-button" aria-label="打开家长空间菜单" aria-expanded="false"><i data-lucide="menu"></i><span>菜单</span></button>
           <button class="avatar-button" aria-label="当前账号的个人资料"><span class="avatar">账</span><span class="avatar-name">当前账号</span></button>
-          <button class="logout-button" id="logout-button" title="退出当前账号">退出登录</button>
+          <button class="logout-button" id="logout-button" title="退出当前账号"><i data-lucide="log-out"></i><span>退出登录</span></button>
         </div>
       </header>
 
@@ -56,10 +57,12 @@
         <button class="nav-item admin-only" data-parent-page="parents"><i data-lucide="users-round"></i><b>家长管理</b></button>
         <button class="nav-item" data-parent-page="students"><i data-lucide="graduation-cap"></i><b>学生管理</b></button>
         <button class="nav-item" data-parent-page="assign"><i data-lucide="clipboard-plus"></i><b>任务分配</b></button>
-        <button class="nav-item" data-parent-page="categories"><i data-lucide="tags"></i><b>任务分类</b></button>
+        <button class="nav-item" data-parent-page="templates"><i data-lucide="notebook-tabs"></i><b>任务模板</b></button>
+        <button class="nav-item admin-only" data-parent-page="categories"><i data-lucide="tags"></i><b>任务分类</b></button>
         <button class="nav-item" data-parent-page="review"><i data-lucide="badge-check"></i><b>审核中心</b><em>2</em></button>
         <button class="nav-item" data-parent-page="stats"><i data-lucide="chart-no-axes-combined"></i><b>数据统计</b></button>
       </aside>
+      <button class="parent-sidebar-backdrop" id="parent-sidebar-backdrop" aria-label="关闭家长空间菜单" hidden></button>
 
       <main class="main-content">
         <section class="page student-page active" id="today">
@@ -71,6 +74,7 @@
             <button class="week-arrow" id="student-week-prev" aria-label="上一周"><i data-lucide="chevron-left"></i></button>
             <div class="week-bar" id="student-week" aria-label="选择日期"></div>
             <button class="week-arrow" id="student-week-next" aria-label="下一周"><i data-lucide="chevron-right"></i></button>
+            <button class="week-today-button" id="student-week-today" type="button">今天</button>
           </div>
 
           <section class="progress-section" aria-label="任务进度">
@@ -96,7 +100,7 @@
             </section>
             <section class="next-reward"><span class="reward-icon">🌙</span><div><p>离下一个月亮</p><h2>还差 100 颗星星</h2><div class="progress-track"><span style="width:0"></span></div><small>完成任务后会累计成长奖励</small></div></section>
           </div>
-          <section class="recent-rewards"><div class="section-title"><h2>最近收到的奖励</h2></div><div class="reward-timeline"></div></section>
+          <section class="recent-rewards"><div class="section-title"><h2>最近收到的奖励</h2></div><div class="reward-timeline"><div class="reward-empty" role="status"><span class="reward-empty-icon"><i data-lucide="gift"></i></span><div><h3>暂时没有收到家长奖励</h3><p>完成任务并通过审核后，奖励会显示在这里。</p></div></div></div></section>
         </section>
 
         <section class="page parent-page" id="overview">
@@ -104,10 +108,10 @@
           <div class="overview-student-row"><div class="child-switch"><span class="avatar">学</span><div><b>暂无学生</b><small></small></div><label><span>查看学生</span><select id="dashboard-student-select" aria-label="切换学生"></select></label></div><section class="child-growth"><div class="section-title"><h2 id="parent-growth-title">学生成长</h2></div><div class="growth-inline"><div class="growth-rewards" id="parent-growth-rewards"><span class="growth-reward"><i>⭐</i><strong>0</strong></span></div><p id="parent-growth-next">再收集 100 颗星星，得到新月亮</p><div class="progress-track"><span style="width:0"></span></div></div></section></div>
           <div class="metric-grid">
             <div class="metric-card week-complete-card"><span><i data-lucide="circle-check-big"></i></span><small>本周完成</small><strong>--</strong><p>本周暂无任务</p></div>
-            <div class="metric-card week-overdue-card"><span><i data-lucide="clock-alert"></i></span><small>本周逾期提醒</small><strong>0</strong><p>本周没有逾期任务</p></div>
-            <button class="metric-card review-card" data-parent-page="review"><span><i data-lucide="clipboard-check"></i></span><small>待审核</small><strong>0</strong><p>所有任务中等待审核的数量</p></button>
+            <div class="metric-card week-overdue-card"><span><i data-lucide="clock-alert"></i></span><small>本周逾期提醒</small><strong>0</strong><p>任务均在计划内</p></div>
+            <button class="metric-card review-card" data-parent-page="review"><span><i data-lucide="clipboard-check"></i></span><small>待审核</small><strong>0</strong><p>暂时无需处理</p></button>
             <div class="metric-card today-complete-card"><span><i data-lucide="calendar-check"></i></span><small>今日完成</small><strong>--</strong><p>今日暂无任务</p></div>
-            <div class="metric-card week-star-card"><span><i data-lucide="star"></i></span><small>本周星星</small><strong>0</strong><p>本周获得的星星数量</p></div>
+            <div class="metric-card week-star-card"><span><i data-lucide="star"></i></span><small>本周星星</small><strong>0</strong><p>完成任务后获得</p></div>
           </div>
           <section class="overview-review-section"><div class="section-title"><h2>待审核任务</h2><button class="text-button" data-parent-page="review">进入审核中心</button></div><div class="review-list" id="compact-review-list"></div></section>
         </section>
@@ -117,24 +121,45 @@
         <section class="page parent-page" id="students"><div class="page-heading"><div><p class="eyebrow">学生管理</p><h1 id="students-page-title">我的孩子</h1></div><button class="primary-button" id="add-student">＋ 新增学生</button></div><div class="student-cards" id="student-cards"></div></section>
 
         <section class="page parent-page" id="assign">
-          <div class="page-heading"><div><p class="eyebrow">学习安排</p><h1>任务分配</h1></div><button class="primary-button" id="open-assignment">＋ 分配任务</button></div>
+          <div class="page-heading"><div><p class="eyebrow">学习安排</p><h1>任务分配</h1></div><div class="page-heading-actions"><button class="secondary-button" id="open-template-assignment"><i data-lucide="list-checks"></i>分配任务</button><button class="primary-button" id="open-assignment"><i data-lucide="plus"></i>新建任务</button></div></div>
           <div class="task-manager-filter"><label>查看学生<select id="task-student-filter"></select></label><span id="task-list-date-label"></span></div>
-          <div class="task-week-wrap"><button class="week-arrow" id="task-week-prev" aria-label="上一周"><i data-lucide="chevron-left"></i></button><div class="task-week" id="task-week"></div><button class="week-arrow" id="task-week-next" aria-label="下一周"><i data-lucide="chevron-right"></i></button></div>
+          <div class="task-week-wrap"><button class="week-arrow" id="task-week-prev" aria-label="上一周"><i data-lucide="chevron-left"></i></button><div class="task-week" id="task-week"></div><button class="week-arrow" id="task-week-next" aria-label="下一周"><i data-lucide="chevron-right"></i></button><button class="week-today-button" id="task-week-today" type="button">今天</button></div>
           <div class="parent-task-list" id="parent-task-list"></div>
         </section>
 
-        <section class="page parent-page" id="assignment-editor">
-          <div class="page-heading"><div><p class="eyebrow">创建学习安排</p><h1>分配任务</h1></div><button class="secondary-button" id="back-to-task-list">返回任务列表</button></div>
-          <form class="assignment-form" id="assignment-form">
-            <section><h2>任务内容</h2><label>任务标题<span>必填</span><input id="assignment-title" required maxlength="80" placeholder="请输入任务标题" /></label><label>任务说明<textarea id="assignment-detail" maxlength="300" placeholder="写下简单的步骤或小提醒"></textarea></label><div class="form-row"><label>任务分类<span>必填</span><span class="category-select-control"><span class="category-select-icon" id="assignment-category-icon"></span><select id="assignment-category" required></select></span></label><label>预计时长<span>必填</span><span class="number-with-unit"><input id="assignment-duration" type="number" min="1" max="240" value="15" required /><b>分钟</b></span></label></div><div class="assignment-resource"><input id="assignment-resource-file" type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip" hidden /><div><b>任务资料</b><span>选填，可上传图片、视频或文件，最大 6 MB</span></div><button type="button" class="secondary-button" id="pick-assignment-resource">＋ 选择文件</button><div id="assignment-resource-preview" hidden></div></div></section>
-            <section><h2>分配对象</h2><div class="assignment-students" id="assignment-students"></div><p class="form-hint">可同时选择多名学生</p></section>
-            <section><h2>分配日期</h2><div class="segmented-control"><button type="button" class="selected" data-assignment-date-mode="single">指定日期</button><button type="button" data-assignment-date-mode="range">连续日期</button></div><div class="assignment-date-fields"><label>任务日期<input id="assignment-single-date" type="date" required /></label><div class="form-row" id="assignment-range-fields" hidden><label>开始日期<input id="assignment-start-date" type="date" /></label><label>结束日期<input id="assignment-end-date" type="date" /></label></div></div><p class="form-hint" id="assignment-date-hint" hidden>连续日期最多可选择 30 天</p></section>
-            <section><h2>反馈与奖励</h2><div class="form-row"><label>反馈要求<select id="assignment-feedback"><option value="photo_or_video">拍照或视频均可</option><option value="photo">拍照</option><option value="video">上传视频</option><option value="none">不需要反馈</option></select></label><label>奖励星星<span>必填</span><span class="number-with-unit"><input id="assignment-stars" type="number" min="1" max="5" value="1" required /><b>颗</b></span></label></div><label class="toggle-row"><input id="assignment-review" type="checkbox" checked /><span></span>需要家长审核</label></section>
-            <p class="login-error" id="assignment-error"></p><div class="form-actions"><button type="button" class="secondary-button" id="cancel-assignment">取消</button><button class="primary-button" type="submit">确认分配</button></div>
+        <section class="page parent-page" id="templates">
+          <div class="page-heading"><div><p class="eyebrow">任务设置</p><h1>任务模板</h1></div><button class="primary-button" id="add-task-template"><i data-lucide="plus"></i>新增模板</button></div>
+          <div class="template-toolbar"><label>任务分类<select id="template-category-filter"><option value="all">全部分类</option></select></label><span id="template-count"></span></div>
+          <div class="template-groups" id="template-groups"></div>
+        </section>
+
+        <section class="page parent-page" id="template-editor">
+          <div class="page-heading"><div><p class="eyebrow">任务模板</p><h1 id="template-editor-title">新增模板</h1></div><button class="secondary-button" id="cancel-template-editor"><i data-lucide="arrow-left"></i>返回模板列表</button></div>
+          <form class="assignment-form" id="template-form">
+            <section><h2>任务内容</h2><label>任务标题<span>必填</span><input id="template-title" required maxlength="80" placeholder="请输入任务标题" /></label><label>任务说明<textarea id="template-detail" maxlength="300" placeholder="写下简单的步骤或小提醒"></textarea></label><div class="form-row"><label>任务分类<span>必填</span><span class="category-select-control"><span class="category-select-icon" id="template-category-icon"></span><select id="template-category" required></select></span></label><label>预计时长<span>必填</span><span class="number-with-unit"><input id="template-duration" type="number" min="1" max="240" value="15" required /><b>分钟</b></span></label></div><div class="template-resource"><input id="template-resource-file" type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip" hidden /><div><b>任务资料</b><span>选填，最大 6 MB</span></div><button type="button" class="secondary-button" id="pick-template-resource"><i data-lucide="paperclip"></i>选择文件</button><div id="template-resource-preview" hidden></div></div></section>
+            <section><h2>完成设置</h2><div class="form-row"><label>奖励星星<span>1 至 5 颗</span><span class="number-with-unit"><input id="template-stars" type="number" min="1" max="5" value="1" required /><b>颗</b></span></label><label>反馈要求<select id="template-feedback"><option value="photo_or_video">图片或视频</option><option value="photo">仅图片</option><option value="video">仅视频</option><option value="none">无需反馈</option></select></label></div><label class="toggle-row"><input id="template-review" type="checkbox" checked /><span></span><b>完成后需要家长审核</b></label><label class="toggle-row"><input id="template-public" type="checkbox" /><span></span><b>开放给其他家长使用</b></label></section>
+            <p class="login-error" id="template-error"></p><div class="form-actions"><button type="button" class="secondary-button" id="cancel-template-form">取消</button><button class="primary-button" type="submit" id="template-submit">保存模板</button></div>
           </form>
         </section>
 
-        <section class="page parent-page" id="categories"><div class="page-heading"><div><p class="eyebrow">任务设置</p><h1>任务分类</h1></div><button class="primary-button" id="add-category">＋ 新增分类</button></div><div class="category-list" id="category-list"></div></section>
+        <section class="page parent-page" id="template-assign">
+          <div class="page-heading"><div><p class="eyebrow">模板任务</p><h1>分配任务</h1></div><button class="secondary-button" id="cancel-template-assignment"><i data-lucide="arrow-left"></i>返回任务列表</button></div>
+          <section id="template-assign-step-one"><div class="assignment-step-heading"><span>1</span><div><h2>选择任务模板</h2><p id="selected-template-summary">尚未选择模板</p></div></div><div class="template-picker-groups" id="template-picker-groups"></div><div class="form-actions"><button class="primary-button" id="template-assignment-next" type="button">下一步<i data-lucide="arrow-right"></i></button></div></section>
+          <form id="template-assign-form" hidden><div class="assignment-step-heading"><span>2</span><div><h2>确认分配对象和日期</h2><p id="template-assignment-selection"></p></div></div><section class="template-assignment-panel"><h2>分配对象</h2><div class="assignment-students" id="template-assignment-students"></div></section><section class="template-assignment-panel"><h2>分配日期</h2><div class="segmented-control"><button type="button" class="selected" data-template-date-mode="single">指定日期</button><button type="button" data-template-date-mode="range">连续日期</button></div><div id="template-single-date-wrap"><label>任务日期<input id="template-single-date" type="date" required /></label></div><div class="form-row" id="template-range-fields" hidden><label>开始日期<input id="template-start-date" type="date" /></label><label>结束日期<input id="template-end-date" type="date" /></label></div><p class="form-hint" id="template-date-hint" hidden>连续日期最多 30 天，每天都会生成所选任务。</p></section><p class="login-error" id="template-assignment-error"></p><div class="form-actions"><button type="button" class="secondary-button" id="template-assignment-back">上一步</button><button type="submit" class="primary-button">确认分配</button></div></form>
+        </section>
+
+        <section class="page parent-page" id="assignment-editor">
+          <div class="page-heading"><div><p class="eyebrow" id="assignment-editor-eyebrow">创建学习安排</p><h1 id="assignment-editor-title">分配任务</h1></div><button class="secondary-button" id="back-to-task-list">返回任务列表</button></div>
+          <form class="assignment-form" id="assignment-form">
+            <section><h2>任务内容</h2><label>任务标题<span>必填</span><input id="assignment-title" required maxlength="80" placeholder="请输入任务标题" /></label><label>任务说明<textarea id="assignment-detail" maxlength="300" placeholder="写下简单的步骤或小提醒"></textarea></label><div class="form-row"><label>任务分类<span>必填</span><span class="category-select-control"><span class="category-select-icon" id="assignment-category-icon"></span><select id="assignment-category" required></select></span></label><label>预计时长<span>必填</span><span class="number-with-unit"><input id="assignment-duration" type="number" min="1" max="240" value="15" required /><b>分钟</b></span></label></div><div class="assignment-resource"><input id="assignment-resource-file" type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip" hidden /><div><b>任务资料</b><span>选填，可上传图片、视频或文件，最大 6 MB</span></div><button type="button" class="secondary-button" id="pick-assignment-resource">＋ 选择文件</button><div id="assignment-resource-preview" hidden></div></div></section>
+            <section><h2>分配对象</h2><div class="assignment-students" id="assignment-students"></div><p class="form-hint">可同时选择多名学生</p></section>
+            <section><h2>分配日期</h2><div class="segmented-control" id="assignment-date-mode-control"><button type="button" class="selected" data-assignment-date-mode="single">指定日期</button><button type="button" data-assignment-date-mode="range">连续日期</button></div><div class="assignment-date-fields"><label>任务日期<input id="assignment-single-date" type="date" required /></label><div class="form-row" id="assignment-range-fields" hidden><label>开始日期<input id="assignment-start-date" type="date" /></label><label>结束日期<input id="assignment-end-date" type="date" /></label></div></div><p class="form-hint" id="assignment-date-hint" hidden>连续日期最多可选择 30 天</p></section>
+            <section><h2>反馈与奖励</h2><div class="form-row"><label>反馈要求<select id="assignment-feedback"><option value="photo_or_video">拍照或视频均可</option><option value="photo">拍照</option><option value="video">上传视频</option><option value="none">不需要反馈</option></select></label><label>奖励星星<span>必填</span><span class="number-with-unit"><input id="assignment-stars" type="number" min="1" max="5" value="1" required /><b>颗</b></span></label></div><label class="toggle-row"><input id="assignment-review" type="checkbox" checked /><span></span>需要家长审核</label></section>
+            <p class="login-error" id="assignment-error"></p><div class="form-actions"><button type="button" class="secondary-button" id="cancel-assignment">取消</button><button class="primary-button" id="assignment-submit" type="submit">确认分配</button></div>
+          </form>
+        </section>
+
+        <section class="page parent-page admin-only" id="categories"><div class="page-heading"><div><p class="eyebrow">任务设置</p><h1>任务分类</h1></div><button class="primary-button" id="add-category">＋ 新增分类</button></div><div class="category-list" id="category-list"></div></section>
 
         <section class="page parent-page" id="review">
           <div class="page-heading"><div><p class="eyebrow">审核中心</p><h1>待审核任务</h1></div><span class="page-count" id="review-count">0 项待审核</span></div>
@@ -153,6 +178,7 @@
     <nav class="bottom-nav" aria-label="学生端移动导航"><button class="active" data-page="today"><i data-lucide="clipboard-check"></i><span>我的任务</span></button><button data-page="tasks"><i data-lucide="list-todo"></i><span>任务列表</span></button><button data-page="growth"><i data-lucide="sparkles"></i><span>成长星球</span></button></nav>
 
     <dialog id="task-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="task-modal-content"></div></dialog>
+    <dialog id="task-detail-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="task-detail-modal-content"></div></dialog>
     <dialog id="review-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="review-modal-content"></div></dialog>
     <dialog id="feedback-preview-dialog" class="media-preview-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="media-preview-content" id="feedback-preview-content"></div></dialog>
     <dialog id="password-dialog"><div class="modal-content"><p class="eyebrow">账号安全</p><h2>请修改初始密码</h2><p>管理员首次登录后需要设置新的安全密码。</p><form id="password-form" class="password-form"><label>当前密码<input id="current-password" type="password" autocomplete="current-password" required /></label><label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="10" required placeholder="至少 10 位，包含字母和数字" /></label><p id="password-error" class="login-error"></p><button class="primary-button" type="submit">保存新密码</button></form></div></dialog>
@@ -169,8 +195,9 @@
     <dialog id="category-dialog" class="input-dialog category-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">任务设置</p><h2 id="category-dialog-title">新增分类</h2><form id="category-form" class="dialog-form"><input id="category-id" type="hidden" /><label>分类名称<span>必填</span><input id="category-name" required minlength="2" maxlength="24" placeholder="例如：科学探索" /></label><fieldset class="icon-picker-field"><legend>分类图标<span>必选</span></legend><div class="icon-picker" id="category-icon-options" aria-label="选择分类图标"></div></fieldset><p class="login-error" id="category-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="submit" class="primary-button" id="category-submit">保存</button></div></form></div></dialog>
     <dialog id="task-delete-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">删除任务</p><h2>确认删除当天这项任务？</h2><p>只会删除当前日期下的这条任务，不影响其他日期的同名任务。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-task-delete">确认删除</button></div></div></dialog>
     <dialog id="category-delete-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">删除分类</p><h2>确认删除这个任务分类？</h2><p>已有任务不会受影响，之后分配任务时将不再显示该分类。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-category-delete">确认删除</button></div></div></dialog>
+    <dialog id="template-delete-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">删除模板</p><h2>确认删除这个任务模板？</h2><p>已经分配给学生的任务不会受到影响。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-template-delete">确认删除</button></div></div></dialog>
     <div class="toast" id="toast" role="status"></div>
     <script src="assets/vendor/lucide.min.js?v=1.42.0"></script>
-    <script src="app.js?v=20260908-ui4"></script>
+    <script src="app.js?v=20260909-ui10"></script>
   </body>
 </html>

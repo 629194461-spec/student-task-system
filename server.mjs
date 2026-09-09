@@ -17,6 +17,7 @@ db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeou
 const captchaStore = new Map();
 const loginAttempts = new Map();
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+const REMEMBER_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 const CAPTCHA_TTL_MS = 1000 * 60 * 5;
 const WINDOW_MS = 1000 * 60 * 15;
 const MAX_LOGIN_ATTEMPTS = 8;
@@ -170,9 +171,9 @@ function secureCookie(name, value, maxAge = 0) {
   if (maxAge) settings.push(`Max-Age=${Math.floor(maxAge / 1000)}`);
   return settings.join('; ');
 }
-function createSession(userId) {
+function createSession(userId, ttlMs = SESSION_TTL_MS) {
   const token = randomBytes(32).toString('base64url');
-  db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)').run(createHash('sha256').update(token).digest('hex'), userId, new Date(unix() + SESSION_TTL_MS).toISOString(), now());
+  db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)').run(createHash('sha256').update(token).digest('hex'), userId, new Date(unix() + ttlMs).toISOString(), now());
   return token;
 }
 function sessionUser(req) {
@@ -256,6 +257,14 @@ function migrate() {
       id INTEGER PRIMARY KEY, name TEXT NOT NULL, mime TEXT NOT NULL, kind TEXT NOT NULL,
       data TEXT NOT NULL, created_by INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS task_templates (
+      id INTEGER PRIMARY KEY, creator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL, category_id INTEGER NOT NULL REFERENCES task_categories(id), detail TEXT NOT NULL,
+      duration_minutes INTEGER NOT NULL, stars INTEGER NOT NULL DEFAULT 1,
+      feedback_type TEXT NOT NULL DEFAULT 'photo_or_video', needs_review INTEGER NOT NULL DEFAULT 1,
+      resource_id INTEGER REFERENCES task_resources(id) ON DELETE SET NULL, is_public INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS rewards (
       id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL, stars INTEGER NOT NULL,
@@ -263,6 +272,8 @@ function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_tasks_student_date ON tasks(student_id, task_date);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_task_templates_creator ON task_templates(creator_id);
+    CREATE INDEX IF NOT EXISTS idx_task_templates_public ON task_templates(is_public);
   `);
   const taskColumns = new Set(db.prepare('PRAGMA table_info(tasks)').all().map(column => column.name));
   if (!taskColumns.has('feedback_kind')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_kind TEXT NOT NULL DEFAULT ''");
@@ -315,6 +326,35 @@ function taskJson(task, includeFeedback = false, includeResource = false) {
   if (includeFeedback) result.feedbackData = task.feedback_data || '';
   if (includeResource) result.resourceData = resource?.data || '';
   return result;
+}
+function taskTemplateJson(template, includeResource = false) {
+  const result = {
+    id: template.id, creatorId: template.creator_id, creatorName: template.creator_name,
+    title: template.title, categoryId: template.category_id, category: template.category_name,
+    icon: template.category_icon, color: template.category_color, detail: template.detail,
+    duration: template.duration_minutes, stars: template.stars, feedbackType: template.feedback_type,
+    needsReview: Boolean(template.needs_review), isPublic: Boolean(template.is_public),
+    isOwner: Boolean(template.is_owner), hasResource: Boolean(template.resource_id),
+    resourceName: template.resource_name || '', resourceMime: template.resource_mime || '',
+    resourceKind: template.resource_kind || '', createdAt: template.created_at, updatedAt: template.updated_at
+  };
+  if (includeResource) result.resourceData = template.resource_data || '';
+  return result;
+}
+const templateSelectSql = `SELECT task_templates.*, task_categories.name AS category_name,
+  task_categories.icon AS category_icon, task_categories.color AS category_color,
+  users.display_name AS creator_name, task_resources.name AS resource_name,
+  task_resources.mime AS resource_mime, task_resources.kind AS resource_kind,
+  task_resources.data AS resource_data
+  FROM task_templates
+  JOIN task_categories ON task_categories.id = task_templates.category_id AND task_categories.active = 1
+  JOIN users ON users.id = task_templates.creator_id
+  LEFT JOIN task_resources ON task_resources.id = task_templates.resource_id`;
+function deleteUnusedResource(resourceId) {
+  if (!resourceId) return;
+  const usedByTask = db.prepare('SELECT 1 FROM tasks WHERE resource_id = ? LIMIT 1').get(resourceId);
+  const usedByTemplate = db.prepare('SELECT 1 FROM task_templates WHERE resource_id = ? LIMIT 1').get(resourceId);
+  if (!usedByTask && !usedByTemplate) db.prepare('DELETE FROM task_resources WHERE id = ?').run(resourceId);
 }
 function studentsForParent(parentId, includeInactive = false) { return db.prepare(`SELECT users.id, users.display_name, users.avatar, users.active FROM parent_students JOIN users ON users.id = parent_students.student_id WHERE parent_students.parent_id = ? ${includeInactive ? '' : 'AND users.active = 1'}`).all(parentId); }
 function canManageStudent(user, studentId) { return user.role === 'admin' || studentsForParent(user.id, true).some(student => student.id === studentId); }
@@ -386,8 +426,9 @@ const server = createServer(async (req, res) => {
         recordFailedLogin(ip); bad(res, 401, '用户名或密码不正确'); return;
       }
       clearRateLimit(ip);
-      const token = createSession(user.id);
-      json(res, 200, { user: publicUser(user) }, { 'set-cookie': secureCookie('lp_session', token, SESSION_TTL_MS) });
+      const sessionTtl = body.rememberMe === true ? REMEMBER_SESSION_TTL_MS : SESSION_TTL_MS;
+      const token = createSession(user.id, sessionTtl);
+      json(res, 200, { user: publicUser(user) }, { 'set-cookie': secureCookie('lp_session', token, sessionTtl) });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
@@ -730,8 +771,119 @@ const server = createServer(async (req, res) => {
       json(res, 200, { categories });
       return;
     }
-    if (req.method === 'POST' && url.pathname === '/api/parent/categories') {
+    if (req.method === 'GET' && url.pathname === '/api/parent/task-templates') {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const templates = db.prepare(`${templateSelectSql}
+        WHERE task_templates.creator_id = ? OR task_templates.is_public = 1
+        ORDER BY task_categories.name, task_templates.updated_at DESC, task_templates.id DESC`).all(user.id);
+      json(res, 200, { templates: templates.map(template => taskTemplateJson({ ...template, is_owner: template.creator_id === user.id })) });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/parent/task-templates') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const body = await readBody(req, 9 * 1024 * 1024);
+      const title = clean(body.title, 80);
+      const detail = clean(body.detail, 300);
+      const categoryId = Number(body.categoryId);
+      const category = db.prepare('SELECT id FROM task_categories WHERE id = ? AND active = 1').get(categoryId);
+      const duration = Number(body.duration);
+      const stars = Number(body.stars);
+      const feedbackType = clean(body.feedbackType, 30) || 'photo_or_video';
+      const resource = body.resourceData ? normalizeTaskResource(body.resourceData, body.resourceName) : null;
+      if (title.length < 2) { bad(res, 400, '任务模板标题需为 2 至 80 个字符'); return; }
+      if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
+      if (!['photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
+      if (body.resourceData && !resource) { bad(res, 400, '任务资料格式不支持、内容无效或超过 6 MB'); return; }
+      if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
+      if (!Number.isInteger(stars) || stars < 1 || stars > 5) { bad(res, 400, '奖励星星需为 1 至 5 颗'); return; }
+      let resourceId = null;
+      db.exec('BEGIN');
+      try {
+        if (resource) resourceId = Number(db.prepare('INSERT INTO task_resources (name, mime, kind, data, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(resource.name, resource.mime, resource.kind, resource.data, user.id, now()).lastInsertRowid);
+        const createdAt = now();
+        const result = db.prepare(`INSERT INTO task_templates (creator_id,title,category_id,detail,duration_minutes,stars,feedback_type,needs_review,resource_id,is_public,created_at,updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, title, categoryId, detail || '请按照任务要求认真完成。', duration, stars, feedbackType, body.needsReview === false ? 0 : 1, resourceId, body.isPublic === true ? 1 : 0, createdAt, createdAt);
+        db.exec('COMMIT');
+        const template = db.prepare(`${templateSelectSql} WHERE task_templates.id = ?`).get(Number(result.lastInsertRowid));
+        json(res, 201, { template: taskTemplateJson({ ...template, is_owner: true }) });
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      return;
+    }
+    if (req.method === 'PATCH' && /^\/api\/parent\/task-templates\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const templateId = Number(url.pathname.split('/')[4]);
+      const current = db.prepare('SELECT * FROM task_templates WHERE id = ?').get(templateId);
+      if (!current) { bad(res, 404, '任务模板不存在'); return; }
+      if (current.creator_id !== user.id) { bad(res, 403, '只能修改自己创建的任务模板'); return; }
+      const body = await readBody(req, 9 * 1024 * 1024);
+      const title = clean(body.title, 80);
+      const detail = clean(body.detail, 300);
+      const categoryId = Number(body.categoryId);
+      const category = db.prepare('SELECT id FROM task_categories WHERE id = ? AND active = 1').get(categoryId);
+      const duration = Number(body.duration);
+      const stars = Number(body.stars);
+      const feedbackType = clean(body.feedbackType, 30) || 'photo_or_video';
+      const resource = body.resourceData ? normalizeTaskResource(body.resourceData, body.resourceName) : null;
+      if (title.length < 2) { bad(res, 400, '任务模板标题需为 2 至 80 个字符'); return; }
+      if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
+      if (!['photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
+      if (body.resourceData && !resource) { bad(res, 400, '任务资料格式不支持、内容无效或超过 6 MB'); return; }
+      if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
+      if (!Number.isInteger(stars) || stars < 1 || stars > 5) { bad(res, 400, '奖励星星需为 1 至 5 颗'); return; }
+      let resourceId = body.removeResource === true ? null : current.resource_id;
+      db.exec('BEGIN');
+      try {
+        if (resource) resourceId = Number(db.prepare('INSERT INTO task_resources (name, mime, kind, data, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(resource.name, resource.mime, resource.kind, resource.data, user.id, now()).lastInsertRowid);
+        db.prepare(`UPDATE task_templates SET title = ?, category_id = ?, detail = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ?, resource_id = ?, is_public = ?, updated_at = ? WHERE id = ?`)
+          .run(title, categoryId, detail || '请按照任务要求认真完成。', duration, stars, feedbackType, body.needsReview === false ? 0 : 1, resourceId, body.isPublic === true ? 1 : 0, now(), templateId);
+        deleteUnusedResource(current.resource_id);
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      const template = db.prepare(`${templateSelectSql} WHERE task_templates.id = ?`).get(templateId);
+      json(res, 200, { template: taskTemplateJson({ ...template, is_owner: true }) });
+      return;
+    }
+    if (req.method === 'DELETE' && /^\/api\/parent\/task-templates\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const templateId = Number(url.pathname.split('/')[4]);
+      const template = db.prepare('SELECT creator_id, resource_id FROM task_templates WHERE id = ?').get(templateId);
+      if (!template) { bad(res, 404, '任务模板不存在'); return; }
+      if (template.creator_id !== user.id) { bad(res, 403, '只能删除自己创建的任务模板'); return; }
+      db.prepare('DELETE FROM task_templates WHERE id = ?').run(templateId);
+      deleteUnusedResource(template.resource_id);
+      json(res, 204, {});
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/parent/task-templates/assign') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const body = await readBody(req);
+      const templateIds = [...new Set((Array.isArray(body.templateIds) ? body.templateIds : []).map(Number).filter(Number.isInteger))];
+      const studentIds = [...new Set((Array.isArray(body.studentIds) ? body.studentIds : []).map(Number).filter(Number.isInteger))];
+      const allowedIds = (user.role === 'admin' ? db.prepare("SELECT id FROM users WHERE role = 'student' AND active = 1").all() : studentsForParent(user.id)).map(student => Number(student.id));
+      const startDate = clean(body.startDate, 10) || businessDate();
+      const endDate = clean(body.endDate || startDate, 10);
+      const dates = dateRange(startDate, endDate);
+      if (!templateIds.length || templateIds.length > 30) { bad(res, 400, '请选择 1 至 30 个任务模板'); return; }
+      if (!studentIds.length || studentIds.some(id => !allowedIds.includes(id))) { bad(res, 403, '请选择有权限的正常学生账号'); return; }
+      if (!dates.length) { bad(res, 400, '请选择有效日期，连续日期最多 30 天'); return; }
+      if (templateIds.length * studentIds.length * dates.length > 1000) { bad(res, 400, '本次生成任务过多，请减少模板、学生或日期数量'); return; }
+      const placeholders = templateIds.map(() => '?').join(',');
+      const templates = db.prepare(`${templateSelectSql} WHERE task_templates.id IN (${placeholders}) AND (task_templates.creator_id = ? OR task_templates.is_public = 1)`).all(...templateIds, user.id);
+      if (templates.length !== templateIds.length) { bad(res, 403, '所选模板不存在或当前账号无权使用'); return; }
+      const insert = db.prepare(`INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,resource_id,status,created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', ?)`);
+      const taskIds = [];
+      db.exec('BEGIN');
+      try {
+        for (const template of templates) for (const studentId of studentIds) for (const date of dates) {
+          taskIds.push(Number(insert.run(studentId, template.title, template.category_name, template.category_icon, template.category_color, template.detail, date, template.duration_minutes, template.stars, template.feedback_type, template.needs_review, template.resource_id, now()).lastInsertRowid));
+        }
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      json(res, 201, { count: taskIds.length, taskIds });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/parent/categories') {
+      const user = requireUser(req, res); if (!user || !requireAdmin(user, res)) return;
       const body = await readBody(req);
       const name = clean(body.name, 24);
       const icon = categoryIcon(body.icon);
@@ -745,7 +897,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === 'PATCH' && /^\/api\/parent\/categories\/\d+$/.test(url.pathname)) {
-      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const user = requireUser(req, res); if (!user || !requireAdmin(user, res)) return;
       const categoryId = Number(url.pathname.split('/')[4]);
       const body = await readBody(req);
       const name = clean(body.name, 24);
@@ -762,7 +914,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === 'DELETE' && /^\/api\/parent\/categories\/\d+$/.test(url.pathname)) {
-      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const user = requireUser(req, res); if (!user || !requireAdmin(user, res)) return;
       const categoryId = Number(url.pathname.split('/')[4]);
       const result = db.prepare('UPDATE task_categories SET active = 0 WHERE id = ? AND active = 1').run(categoryId);
       if (!result.changes) { bad(res, 404, '任务分类不存在'); return; }
@@ -789,6 +941,15 @@ const server = createServer(async (req, res) => {
         ? db.prepare(`${dateSql} AND student_id = ? ORDER BY task_date`).all(week.start, week.end, studentId)
         : db.prepare(`${dateSql} AND student_id IN (${allowedIds.map(() => '?').join(',')}) ORDER BY task_date`).all(week.start, week.end, ...allowedIds);
       json(res, 200, { tasks: tasks.map(taskJson), taskDates: taskDates.map(row => row.task_date) });
+      return;
+    }
+    if (req.method === 'GET' && /^\/api\/parent\/tasks\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const taskId = Number(url.pathname.split('/')[4]);
+      const task = db.prepare('SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.id = ? AND tasks.is_demo = 0').get(taskId);
+      if (!task) { bad(res, 404, '任务不存在'); return; }
+      if (!canManageStudent(user, task.student_id)) { bad(res, 403, '无权查看此任务'); return; }
+      json(res, 200, { task: taskJson(task, true, true) });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/parent/tasks') {
@@ -832,6 +993,43 @@ const server = createServer(async (req, res) => {
       json(res, 200, { task: taskJson(task, true) });
       return;
     }
+    if (req.method === 'PATCH' && /^\/api\/parent\/tasks\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const taskId = Number(url.pathname.split('/')[4]);
+      const task = db.prepare('SELECT * FROM tasks WHERE id = ? AND is_demo = 0').get(taskId);
+      if (!task) { bad(res, 404, '任务不存在'); return; }
+      if (!canManageStudent(user, task.student_id)) { bad(res, 403, '无权修改此任务'); return; }
+      if (['pending_review', 'completed'].includes(task.status)) { bad(res, 409, '待审核或已完成的任务不能修改'); return; }
+      const body = await readBody(req, 9 * 1024 * 1024);
+      const studentId = Number(body.studentId);
+      const allowedIds = (user.role === 'admin' ? db.prepare("SELECT id FROM users WHERE role = 'student' AND active = 1").all() : studentsForParent(user.id)).map(student => Number(student.id));
+      const date = clean(body.date || body.startDate, 10);
+      const title = clean(body.title, 80);
+      const detail = clean(body.detail, 300);
+      const category = db.prepare('SELECT name, icon, color FROM task_categories WHERE id = ? AND active = 1').get(Number(body.categoryId));
+      const duration = Number(body.duration);
+      const stars = Number(body.stars);
+      const feedbackType = clean(body.feedbackType, 30) || 'photo_or_video';
+      const resource = body.resourceData ? normalizeTaskResource(body.resourceData, body.resourceName) : null;
+      if (!allowedIds.includes(studentId)) { bad(res, 403, '请选择有权限的正常学生账号'); return; }
+      if (title.length < 2 || dateRange(date, date).length !== 1) { bad(res, 400, '请填写任务标题和有效日期'); return; }
+      if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
+      if (!['photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
+      if (body.resourceData && !resource) { bad(res, 400, '任务资料格式不支持、内容无效或超过 6 MB'); return; }
+      if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
+      if (!Number.isInteger(stars) || stars < 1 || stars > 5) { bad(res, 400, '奖励星星需为 1 至 5 颗'); return; }
+      let resourceId = body.removeResource === true ? null : task.resource_id;
+      db.exec('BEGIN');
+      try {
+        if (resource) resourceId = Number(db.prepare('INSERT INTO task_resources (name, mime, kind, data, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(resource.name, resource.mime, resource.kind, resource.data, user.id, now()).lastInsertRowid);
+        db.prepare(`UPDATE tasks SET student_id = ?, title = ?, category = ?, icon = ?, category_color = ?, detail = ?, task_date = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ?, resource_id = ? WHERE id = ?`).run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', date, duration, stars, feedbackType, body.needsReview === false ? 0 : 1, resourceId, taskId);
+        if (task.resource_id && task.resource_id !== resourceId) deleteUnusedResource(task.resource_id);
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      const updated = db.prepare('SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.id = ?').get(taskId);
+      json(res, 200, { task: taskJson(updated) });
+      return;
+    }
     if (req.method === 'DELETE' && /^\/api\/parent\/tasks\/\d+$/.test(url.pathname)) {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
       const taskId = Number(url.pathname.split('/')[4]);
@@ -840,7 +1038,7 @@ const server = createServer(async (req, res) => {
       if (!canManageStudent(user, task.student_id)) { bad(res, 403, '无权删除此任务'); return; }
       if (['pending_review', 'completed'].includes(task.status)) { bad(res, 409, '待审核或已完成的任务不能删除'); return; }
       db.prepare('DELETE FROM tasks WHERE id = ?').run(taskId);
-      if (task.resource_id && !db.prepare('SELECT 1 FROM tasks WHERE resource_id = ? LIMIT 1').get(task.resource_id)) db.prepare('DELETE FROM task_resources WHERE id = ?').run(task.resource_id);
+      deleteUnusedResource(task.resource_id);
       json(res, 204, {});
       return;
     }

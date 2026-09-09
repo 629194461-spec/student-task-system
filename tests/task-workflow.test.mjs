@@ -63,19 +63,43 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal(secondLogin.response.status, 200);
 
   const draftId = draftTask.body.taskIds[0];
+  const studentDetailBeforeStart = await request(`/api/student/tasks/${draftId}`, { cookie: firstLogin.cookie });
+  assert.equal(studentDetailBeforeStart.response.status, 200);
+  assert.equal(studentDetailBeforeStart.body.task.status, 'not_started', 'viewing details must not start a task');
+  const parentDetail = await request(`/api/parent/tasks/${draftId}`, { cookie: admin });
+  assert.equal(parentDetail.response.status, 200);
+  assert.equal(parentDetail.body.task.id, draftId);
+  assert.equal(parentDetail.body.task.studentName, '测试学生甲');
+  const detailParentName = `detail_parent_${suffix}`;
+  const detailParent = await request('/api/admin/parents', { cookie: admin, method: 'POST', body: JSON.stringify({ displayName: '详情测试家长', username: detailParentName, password: 'Parent2026A' }) });
+  assert.equal(detailParent.response.status, 201);
+  assert.equal((await request(`/api/admin/students/${firstId}/parents`, { cookie: admin, method: 'POST', body: JSON.stringify({ parentId: detailParent.body.parent.id }) })).response.status, 200);
+  const detailParentLogin = await login(detailParentName, 'Parent2026A');
+  assert.equal((await request(`/api/parent/tasks/${draftId}`, { cookie: detailParentLogin.cookie })).response.status, 200);
+  assert.equal((await request(`/api/parent/tasks/${otherTask.body.taskIds[0]}`, { cookie: detailParentLogin.cookie })).response.status, 403);
   const started = await request(`/api/student/tasks/${draftId}/draft`, { cookie: firstLogin.cookie, method: 'PATCH', body: JSON.stringify({ feedbackNote: '已经完成一半' }) });
   assert.equal(started.response.status, 200);
   assert.equal(started.body.task.status, 'in_progress');
   assert.equal(started.body.task.feedbackNote, '已经完成一半');
   assert.ok(started.body.task.startedAt);
+  const edited = await request(`/api/parent/tasks/${draftId}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ studentId: firstId, title: '修改后的草稿任务', detail: '家长已调整要求', categoryId, duration: 20, stars: 3, feedbackType: 'none', needsReview: true, date: currentDate }) });
+  assert.equal(edited.response.status, 200);
+  assert.equal(edited.body.task.title, '修改后的草稿任务');
+  assert.equal(edited.body.task.duration, 20);
+  assert.equal(edited.body.task.stars, 3);
+  assert.equal(edited.body.task.status, 'in_progress');
   const detail = await request(`/api/student/tasks/${draftId}`, { cookie: firstLogin.cookie });
   assert.equal(detail.body.task.feedbackNote, '已经完成一半');
 
   const pending = await request(`/api/student/tasks/${draftId}/submit`, { cookie: firstLogin.cookie, method: 'POST', body: JSON.stringify({ feedbackNote: '已完成' }) });
   assert.equal(pending.body.task.status, 'pending_review');
+  const editPending = await request(`/api/parent/tasks/${draftId}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ studentId: firstId, title: '不应保存', categoryId, duration: 10, stars: 1, feedbackType: 'none', needsReview: true, date: currentDate }) });
+  assert.equal(editPending.response.status, 409);
   const completedId = completedTask.body.taskIds[0];
   const completed = await request(`/api/student/tasks/${completedId}/submit`, { cookie: firstLogin.cookie, method: 'POST', body: '{}' });
   assert.equal(completed.body.task.status, 'completed');
+  const editCompleted = await request(`/api/parent/tasks/${completedId}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ studentId: firstId, title: '不应保存', categoryId, duration: 10, stars: 1, feedbackType: 'none', needsReview: false, date: currentDate }) });
+  assert.equal(editCompleted.response.status, 409);
   const otherId = otherTask.body.taskIds[0];
   await request(`/api/student/tasks/${otherId}/submit`, { cookie: secondLogin.cookie, method: 'POST', body: '{}' });
 
