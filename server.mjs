@@ -3,7 +3,7 @@ import { mkdirSync, existsSync, readFileSync, createReadStream } from 'node:fs';
 import { extname, join, normalize, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
-import { deleteStoredUrl, localUploadPath, storageDriver, storeDataUrl, validateStorageConfiguration } from './storage.mjs';
+import { deleteStoredUrl, localUploadPath, signStoredUrl, storageDriver, storeDataUrl, validateStorageConfiguration } from './storage.mjs';
 
 const root = resolve('.');
 const dataDir = resolve(process.env.DATA_DIR || join(root, 'data'));
@@ -189,6 +189,7 @@ function normalizeAvatar(value) {
   return validSignature ? value : '';
 }
 function isStoredFileUrl(value) { return typeof value === 'string' && (/^\/uploads\//.test(value) || /^https:\/\//.test(value)); }
+function stripUrlQuery(value) { return typeof value === 'string' ? value.split('?')[0] : value; }
 function isImageAvatar(value) { return /^data:image\/(png|jpeg|webp);base64,/.test(value) || isStoredFileUrl(value); }
 function avatarInitial(displayName, fallback = '家') { return Array.from(String(displayName || '').trim()).at(-1) || fallback; }
 async function avatarValue(value, current, displayName, fallback = '家') {
@@ -197,7 +198,7 @@ async function avatarValue(value, current, displayName, fallback = '家') {
     const url = await storeDataUrl(normalized, { dataDir, folder: 'avatars', name: `${displayName}.png` });
     return { avatar: url, uploadedUrl: url };
   }
-  if (isStoredFileUrl(value) && value === current) return { avatar: current, uploadedUrl: '' };
+  if (isStoredFileUrl(value) && stripUrlQuery(value) === current) return { avatar: current, uploadedUrl: '' };
   if (/^data:image\//.test(current)) {
     const url = await storeDataUrl(current, { dataDir, folder: 'avatars', name: `${displayName}.png` });
     return { avatar: url, uploadedUrl: url };
@@ -206,7 +207,7 @@ async function avatarValue(value, current, displayName, fallback = '家') {
 }
 async function feedbackValue(value, task, name) {
   if (typeof value !== 'string' || !value) return { url: '', kind: '', uploadedUrl: '' };
-  if (isStoredFileUrl(value) && value === task.feedback_url) return { url: value, kind: task.feedback_kind || '', uploadedUrl: '' };
+  if (isStoredFileUrl(value) && stripUrlQuery(value) === task.feedback_url) return { url: task.feedback_url, kind: task.feedback_kind || '', uploadedUrl: '' };
   const feedback = normalizeTaskFeedback(value);
   if (!feedback) return null;
   const url = await storeDataUrl(feedback.data, { dataDir, folder: 'student-feedback', name: name || '学习反馈' });
@@ -418,7 +419,7 @@ function ensureBuiltInAdmin() {
   db.prepare('INSERT INTO system_settings (key, value) VALUES (?, ?)').run(migrationKey, now());
 }
 
-function publicUser(user) { return { id: user.id, username: user.username, role: user.role, displayName: user.display_name, avatar: user.avatar, mustChangePassword: Boolean(user.must_change_password) }; }
+function publicUser(user) { return { id: user.id, username: user.username, role: user.role, displayName: user.display_name, avatar: signStoredUrl(user.avatar), mustChangePassword: Boolean(user.must_change_password) }; }
 function linkedResources(ownerType, ownerId, legacyResourceId, includeData = false) {
   const table = ownerType === 'template' ? 'template_resource_links' : 'task_resource_links';
   const key = ownerType === 'template' ? 'template_id' : 'task_id';
@@ -428,7 +429,7 @@ function linkedResources(ownerType, ownerId, legacyResourceId, includeData = fal
   if (!resources.length && legacyResourceId) {
     resources = db.prepare(`SELECT id, name, mime, kind${includeData ? ', url, data' : ''} FROM task_resources WHERE id = ?`).all(legacyResourceId);
   }
-  return resources.map(resource => ({ id: resource.id, name: resource.name, mime: resource.mime, kind: resource.kind, ...(includeData ? { data: resource.url || resource.data } : {}) }));
+  return resources.map(resource => ({ id: resource.id, name: resource.name, mime: resource.mime, kind: resource.kind, ...(includeData ? { data: signStoredUrl(resource.url || resource.data) } : {}) }));
 }
 async function storeResources(resources, folder) {
   const stored = [];
@@ -469,8 +470,8 @@ function taskJson(task, includeFeedback = false, includeResource = false) {
   const resourceCount = hasSummary ? Number(task.resource_count) : resources.length;
   const repeatWeekdays = String(task.repeat_weekdays || '').split(',').map(Number).filter(day => day >= 1 && day <= 7);
   const scheduleType = task.series_id ? 'repeat' : task.schedule_type || 'single';
-  const result = { id: task.id, studentId: task.student_id, title: task.title, category: task.category, icon: task.icon, color: task.category_color, detail: task.detail, date: task.task_date, duration: task.duration_minutes, stars: task.stars, feedbackType: task.feedback_type, needsReview: Boolean(task.needs_review), status: task.status, startedAt: task.started_at, draftUpdatedAt: task.draft_updated_at, submittedAt: task.submitted_at, encouragement: task.encouragement, studentName: task.student_name, studentAvatar: task.student_avatar, feedbackKind: task.feedback_kind || '', feedbackName: task.feedback_name || '', feedbackNote: task.feedback_note || '', hasFeedback: Boolean(task.feedback_url || task.feedback_data || task.feedback_note), hasResource: resourceCount > 0, resourceCount, resourceName: resource?.name || '', resourceMime: resource?.mime || '', resourceKind: resource?.kind || '', resources, scheduleType, isDateRange: scheduleType === 'range', availableStartDate: task.available_start_date || task.task_date, availableEndDate: task.available_end_date || task.task_date, isRecurring: Boolean(task.series_id), seriesId: task.series_id || '', repeatPattern: task.repeat_pattern || '', repeatWeekdays, seriesStartDate: task.series_start_date || '', seriesEndDate: task.series_end_date || '' };
-  if (includeFeedback) result.feedbackData = task.feedback_url || task.feedback_data || '';
+  const result = { id: task.id, studentId: task.student_id, title: task.title, category: task.category, icon: task.icon, color: task.category_color, detail: task.detail, date: task.task_date, duration: task.duration_minutes, stars: task.stars, feedbackType: task.feedback_type, needsReview: Boolean(task.needs_review), status: task.status, startedAt: task.started_at, draftUpdatedAt: task.draft_updated_at, submittedAt: task.submitted_at, encouragement: task.encouragement, studentName: task.student_name, studentAvatar: signStoredUrl(task.student_avatar), feedbackKind: task.feedback_kind || '', feedbackName: task.feedback_name || '', feedbackNote: task.feedback_note || '', hasFeedback: Boolean(task.feedback_url || task.feedback_data || task.feedback_note), hasResource: resourceCount > 0, resourceCount, resourceName: resource?.name || '', resourceMime: resource?.mime || '', resourceKind: resource?.kind || '', resources, scheduleType, isDateRange: scheduleType === 'range', availableStartDate: task.available_start_date || task.task_date, availableEndDate: task.available_end_date || task.task_date, isRecurring: Boolean(task.series_id), seriesId: task.series_id || '', repeatPattern: task.repeat_pattern || '', repeatWeekdays, seriesStartDate: task.series_start_date || '', seriesEndDate: task.series_end_date || '' };
+  if (includeFeedback) result.feedbackData = signStoredUrl(task.feedback_url || task.feedback_data || '');
   if (includeResource) result.resourceData = resource?.data || '';
   return result;
 }
@@ -528,10 +529,11 @@ function studentListFor(user) {
     WHERE parent_students.student_id = ? AND users.role = 'parent' ORDER BY users.display_name`);
   return students.map(student => ({
     ...student,
+    avatar: signStoredUrl(student.avatar),
     ...(profile.get(student.id) || { grade: '三年级', note: '' }),
     ...(todayTask.get(student.id, businessDate(), businessDate(), businessDate()) || { total: 0, completed: 0, pending: 0 }),
     growth: rewardBreakdown(rewardTotal.get(student.id).total),
-    parents: linkedParents.all(student.id).filter(parent => user.role === 'admin' || parent.id === user.id).map(parent => ({ id: parent.id, username: parent.username, displayName: parent.display_name, avatar: parent.avatar, active: Boolean(parent.active) })),
+    parents: linkedParents.all(student.id).filter(parent => user.role === 'admin' || parent.id === user.id).map(parent => ({ id: parent.id, username: parent.username, displayName: parent.display_name, avatar: signStoredUrl(parent.avatar), active: Boolean(parent.active) })),
     active: Boolean(student.active)
   }));
 }
@@ -541,7 +543,7 @@ function parentList() {
   const linkedStudents = db.prepare(`SELECT users.id, users.display_name, users.avatar, users.active
     FROM parent_students JOIN users ON users.id = parent_students.student_id
     WHERE parent_students.parent_id = ? ORDER BY users.display_name`);
-  return parents.map(parent => ({ id: parent.id, username: parent.username, displayName: parent.display_name, avatar: parent.avatar, active: Boolean(parent.active), createdAt: parent.created_at, students: linkedStudents.all(parent.id).map(student => ({ id: student.id, displayName: student.display_name, avatar: student.avatar, active: Boolean(student.active) })) }));
+  return parents.map(parent => ({ id: parent.id, username: parent.username, displayName: parent.display_name, avatar: signStoredUrl(parent.avatar), active: Boolean(parent.active), createdAt: parent.created_at, students: linkedStudents.all(parent.id).map(student => ({ id: student.id, displayName: student.display_name, avatar: signStoredUrl(student.avatar), active: Boolean(student.active) })) }));
 }
 
 migrate();
@@ -727,7 +729,7 @@ const server = createServer(async (req, res) => {
       const weekStars = Number(db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND substr(created_at, 1, 10) BETWEEN ? AND ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(studentId, week.start, week.end).total);
       const totalStars = Number(db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(studentId).total);
       json(res, 200, {
-        students,
+        students: students.map(student => ({ ...student, avatar: signStoredUrl(student.avatar) })),
         selectedStudentId: studentId,
         period: { today: currentDate, weekStart: week.start, weekEnd: week.end },
         growth: rewardBreakdown(totalStars),
@@ -873,7 +875,7 @@ const server = createServer(async (req, res) => {
         const tasks = taskStats.get(student.id, range.start, range.end);
         const stars = Number(rewardStats.get(student.id, range.start, range.end).stars || 0);
         const total = Number(tasks.total || 0); const completed = Number(tasks.completed || 0); const onTime = Number(tasks.on_time || 0);
-        return { studentId: student.id, studentName: student.display_name, studentAvatar: student.avatar, active: Boolean(student.active), stars, total, completed, onTime, completionRate: total ? Math.round(completed / total * 100) : null, onTimeRate: total ? Math.round(onTime / total * 100) : null };
+        return { studentId: student.id, studentName: student.display_name, studentAvatar: signStoredUrl(student.avatar), active: Boolean(student.active), stars, total, completed, onTime, completionRate: total ? Math.round(completed / total * 100) : null, onTimeRate: total ? Math.round(onTime / total * 100) : null };
       }).sort((a, b) => b.stars - a.stars || (b.completionRate ?? -1) - (a.completionRate ?? -1) || a.studentName.localeCompare(b.studentName, 'zh-CN'));
       const summary = rows.reduce((total, row) => ({ stars: total.stars + row.stars, tasks: total.tasks + row.total, completed: total.completed + row.completed, onTime: total.onTime + row.onTime }), { stars: 0, tasks: 0, completed: 0, onTime: 0 });
       summary.completionRate = summary.tasks ? Math.round(summary.completed / summary.tasks * 100) : null;

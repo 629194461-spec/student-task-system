@@ -30,14 +30,32 @@ function cosSettings() {
   const publicBase = (process.env.COS_PUBLIC_BASE_URL || endpoint).replace(/\/$/, '');
   return { bucket, region, secretId, secretKey, endpoint, publicBase };
 }
-function cosAuthorization(method, pathname, host, secretId, secretKey) {
+function cosAuthorization(method, pathname, host, secretId, secretKey, expiresIn = 3600) {
   const start = Math.floor(Date.now() / 1000) - 60;
-  const keyTime = `${start};${start + 3600}`;
+  const keyTime = `${start};${start + expiresIn}`;
   const signKey = hmacSha1(secretKey, keyTime);
   const httpString = `${method.toLowerCase()}\n${pathname}\n\nhost=${host.toLowerCase()}\n`;
   const stringToSign = `sha1\n${keyTime}\n${sha1(httpString)}\n`;
   const signature = hmacSha1(signKey, stringToSign);
   return `q-sign-algorithm=sha1&q-ak=${encodeURIComponent(secretId)}&q-sign-time=${keyTime}&q-key-time=${keyTime}&q-header-list=host&q-url-param-list=&q-signature=${signature}`;
+}
+
+const COS_SIGN_TTL_MS = () => Math.max(60_000, Number(process.env.COS_SIGN_TTL_MS) || 3_600_000);
+
+// 将存储的 COS URL 转换为带时效的签名 GET URL（私有桶读取）。
+// 本地 /uploads/ 与非本桶 URL 原样返回；签名有效期默认 1 小时，可用 COS_SIGN_TTL_MS 调整。
+export function signStoredUrl(value) {
+  if (typeof value !== 'string' || !value) return value || '';
+  const cleanUrl = value.split('?')[0];
+  if (cleanUrl.startsWith('/uploads/')) return cleanUrl;
+  const settings = cosSettings();
+  if (!settings.publicBase || !cleanUrl.startsWith(`${settings.publicBase}/`)) return cleanUrl;
+  try {
+    if (new URL(settings.publicBase).host !== new URL(settings.endpoint).host) return cleanUrl;
+  } catch { return cleanUrl; }
+  const encodedKey = encodeObjectKey(decodeURIComponent(cleanUrl.slice(settings.publicBase.length + 1)));
+  const host = new URL(settings.endpoint).host;
+  return `${settings.publicBase}/${encodedKey}?${cosAuthorization('GET', `/${encodedKey}`, host, settings.secretId, settings.secretKey, Math.ceil(COS_SIGN_TTL_MS() / 1000) + 60)}`;
 }
 
 export function storageDriver() {
