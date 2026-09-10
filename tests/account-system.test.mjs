@@ -36,6 +36,8 @@ test('admin manages parent accounts and parent-student visibility', async () => 
   const p1Id = p1Create.body.parent.id;
   const p2Create = await request('/api/admin/parents', { cookie: admin, method: 'POST', body: JSON.stringify({ displayName: '测试家长乙', username: p2Name, password: 'Parent2026B', avatar }) });
   assert.equal(p2Create.response.status, 201);
+  assert.match(p2Create.body.parent.avatar, /^\/uploads\/avatars\//, 'uploaded avatars must be stored as URLs');
+  assert.equal((await fetch(`${base}${p2Create.body.parent.avatar}`)).status, 200);
   const p2Id = p2Create.body.parent.id;
 
   const immutableUsername = await request(`/api/admin/parents/${p1Id}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ displayName: '测试家长甲新', username: `changed_${suffix}` }) });

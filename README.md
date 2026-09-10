@@ -2,6 +2,8 @@
 
 面向小学生、家长和平台管理员的学习任务管理系统。服务端使用 Node.js 24 内置 SQLite，前端与 API 同源部署。
 
+生产环境的用户头像、任务/模板资料和学生反馈存放在腾讯云 COS，SQLite 只保存文件 URL；本地开发和自动测试使用 `data/uploads/` 文件存储。
+
 ## 本地启动
 
 ```bash
@@ -32,7 +34,7 @@ npm test
 
 ## 生产部署
 
-1. 复制 `.env.example` 为 `.env`。首次部署后使用内置超级管理员登录。
+1. 复制 `.env.example` 为 `.env`，填写腾讯云 COS 存储桶与专用 CAM 子账号密钥。首次部署后使用内置超级管理员登录。
 2. 使用 HTTPS 反向代理，将应用暴露到公网；生产 Cookie 会自动设置 `Secure`、`HttpOnly` 和 `SameSite=Strict`。
 3. 运行 `docker compose up -d --build`。数据库持久化在 `learning-planet-data` 卷中，应纳入备份计划。
 
@@ -53,3 +55,9 @@ npm test
 - 常见响应安全头、路径校验、文件签名校验、请求体大小限制与参数长度限制。
 
 完整生产部署、备份恢复和运维说明见 [`前后端部署说明.md`](./前后端部署说明.md)。
+
+旧版本数据库中的 Base64 上传内容可在停服并备份后迁移：
+
+```bash
+npm run migrate:storage
+```

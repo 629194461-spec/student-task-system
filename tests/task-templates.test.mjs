@@ -56,7 +56,9 @@ test('task templates enforce visibility, ownership, and batch assignment', async
   assert.equal(ownDetail.response.status, 200);
   assert.equal(ownDetail.body.template.stars, 27);
   assert.deepEqual(ownDetail.body.template.resources.map(resource => resource.name), ['说明一.txt', '说明二.txt']);
-  assert.ok(ownDetail.body.template.resources.every(resource => resource.data.startsWith('data:text/plain;base64,')));
+  assert.ok(ownDetail.body.template.resources.every(resource => resource.data.startsWith('/uploads/')));
+  const originalResourceUrls = ownDetail.body.template.resources.map(resource => resource.data);
+  assert.deepEqual(await Promise.all(originalResourceUrls.map(async url => Buffer.from(await (await fetch(`${base}${url}`)).arrayBuffer()).toString())), ['A', 'B']);
   const ownEditMetadata = await request(`/api/parent/task-templates/${own.body.template.id}?includeData=0`, { cookie: p2 });
   assert.equal(ownEditMetadata.response.status, 200);
   assert.deepEqual(ownEditMetadata.body.template.resources.map(resource => resource.name), ['说明一.txt', '说明二.txt']);
@@ -71,7 +73,7 @@ test('task templates enforce visibility, ownership, and batch assignment', async
   assert.equal(ownUpdated.body.template.title, '乙的模板更新');
   assert.ok(ownUpdated.body.template.updatedAt);
   const ownDetailAfterEdit = await request(`/api/parent/task-templates/${own.body.template.id}`, { cookie: p2 });
-  assert.deepEqual(ownDetailAfterEdit.body.template.resources.map(resource => resource.data), ['data:text/plain;base64,QQ==', 'data:text/plain;base64,Qg=='], 'editing template fields must preserve unchanged attachments');
+  assert.deepEqual(ownDetailAfterEdit.body.template.resources.map(resource => resource.data), originalResourceUrls, 'editing template fields must preserve unchanged attachment URLs');
   const forbiddenUse = await request('/api/parent/task-templates/assign', { cookie: p2, method: 'POST', body: JSON.stringify({ templateIds: [privateTemplate.body.template.id], studentIds: [student.body.student.id], startDate: '2026-09-10', endDate: '2026-09-10' }) });
   assert.equal(forbiddenUse.response.status, 403);
 
@@ -104,4 +106,12 @@ test('task templates enforce visibility, ownership, and batch assignment', async
   assert.equal(weeklyDetail.body.task.repeatPattern, 'weekly');
   assert.deepEqual(weeklyDetail.body.task.repeatWeekdays, [2, 4]);
   assert.ok(weeklyDetail.body.task.isRecurring);
+
+  const rangeAssigned = await request('/api/parent/task-templates/assign', { cookie: p2, method: 'POST', body: JSON.stringify({ templateIds: [shared.body.template.id], studentIds: [student.body.student.id], scheduleType: 'range', startDate: '2026-10-01', endDate: '2026-10-05' }) });
+  assert.equal(rangeAssigned.response.status, 201);
+  assert.equal(rangeAssigned.body.count, 1);
+  const rangeTask = (await request(`/api/parent/tasks/${rangeAssigned.body.taskIds[0]}`, { cookie: p2 })).body.task;
+  assert.equal(rangeTask.isDateRange, true);
+  assert.equal(rangeTask.availableStartDate, '2026-10-01');
+  assert.equal(rangeTask.availableEndDate, '2026-10-05');
 });

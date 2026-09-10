@@ -1,8 +1,9 @@
 FROM node:24-bookworm-slim
 
 WORKDIR /app
-COPY package.json server.mjs index.html app.js styles.css ./
+COPY package.json server.mjs storage.mjs index.html app.js styles.css ./
 COPY assets ./assets
+COPY scripts ./scripts
 
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",
-    "test": "node tests/run-integration.mjs"
+    "test": "node tests/run-integration.mjs",
+    "migrate:storage": "node scripts/migrate-media-to-storage.mjs"
   },
   "engines": {
     "node": ">=24.0.0"

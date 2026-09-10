@@ -3,6 +3,7 @@ import { mkdirSync, existsSync, readFileSync, createReadStream } from 'node:fs';
 import { extname, join, normalize, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
+import { deleteStoredUrl, localUploadPath, storageDriver, storeDataUrl, validateStorageConfiguration } from './storage.mjs';
 
 const root = resolve('.');
 const dataDir = resolve(process.env.DATA_DIR || join(root, 'data'));
@@ -13,6 +14,7 @@ const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || '127.0.0.1';
 const db = new DatabaseSync(join(dataDir, 'learning-planet.db'));
 db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+validateStorageConfiguration();
 
 const captchaStore = new Map();
 const loginAttempts = new Map();
@@ -82,7 +84,14 @@ function taskSchedule(body) {
   const scheduleType = explicitType || (legacyEnd && legacyStart && legacyEnd !== legacyStart ? 'repeat' : 'single');
   if (scheduleType === 'single') {
     const date = clean(body.date || body.startDate, 10) || businessDate();
-    return dateRange(date, date).length === 1 ? { scheduleType, dates: [date], startDate: date, endDate: date, repeatPattern: '', weekdays: [] } : null;
+    return dateRange(date, date).length === 1 ? { scheduleType, dates: [date], taskDate: date, startDate: date, endDate: date, repeatPattern: '', weekdays: [] } : null;
+  }
+  if (scheduleType === 'range') {
+    const startDate = clean(body.startDate, 10) || businessDate();
+    const endDate = clean(body.endDate, 10);
+    return dateRange(startDate, startDate).length === 1 && dateRange(endDate, endDate).length === 1 && endDate >= startDate
+      ? { scheduleType, dates: [endDate], taskDate: endDate, startDate, endDate, repeatPattern: '', weekdays: [] }
+      : null;
   }
   if (scheduleType !== 'repeat') return null;
   const startDate = clean(body.startDate, 10) || businessDate();
@@ -95,7 +104,7 @@ function taskSchedule(body) {
     : [];
   if (repeatPattern === 'weekly' && !weekdays.length) return null;
   const dates = repeatPattern === 'daily' ? range : range.filter(date => weekdays.includes(((new Date(`${date}T12:00:00Z`).getUTCDay() + 6) % 7) + 1));
-  return dates.length ? { scheduleType, dates, startDate, endDate, repeatPattern, weekdays } : null;
+  return dates.length ? { scheduleType, dates, taskDate: dates[0], startDate, endDate, repeatPattern, weekdays } : null;
 }
 function json(res, status, body, headers = {}) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers });
@@ -179,8 +188,30 @@ function normalizeAvatar(value) {
       : bytes.subarray(0, 4).toString() === 'RIFF' && bytes.subarray(8, 12).toString() === 'WEBP';
   return validSignature ? value : '';
 }
-function isImageAvatar(value) { return /^data:image\/(png|jpeg|webp);base64,/.test(value); }
+function isStoredFileUrl(value) { return typeof value === 'string' && (/^\/uploads\//.test(value) || /^https:\/\//.test(value)); }
+function isImageAvatar(value) { return /^data:image\/(png|jpeg|webp);base64,/.test(value) || isStoredFileUrl(value); }
 function avatarInitial(displayName, fallback = '家') { return Array.from(String(displayName || '').trim()).at(-1) || fallback; }
+async function avatarValue(value, current, displayName, fallback = '家') {
+  const normalized = normalizeAvatar(value);
+  if (/^data:image\//.test(normalized)) {
+    const url = await storeDataUrl(normalized, { dataDir, folder: 'avatars', name: `${displayName}.png` });
+    return { avatar: url, uploadedUrl: url };
+  }
+  if (isStoredFileUrl(value) && value === current) return { avatar: current, uploadedUrl: '' };
+  if (/^data:image\//.test(current)) {
+    const url = await storeDataUrl(current, { dataDir, folder: 'avatars', name: `${displayName}.png` });
+    return { avatar: url, uploadedUrl: url };
+  }
+  return { avatar: isImageAvatar(current) ? current : avatarInitial(displayName, fallback), uploadedUrl: '' };
+}
+async function feedbackValue(value, task, name) {
+  if (typeof value !== 'string' || !value) return { url: '', kind: '', uploadedUrl: '' };
+  if (isStoredFileUrl(value) && value === task.feedback_url) return { url: value, kind: task.feedback_kind || '', uploadedUrl: '' };
+  const feedback = normalizeTaskFeedback(value);
+  if (!feedback) return null;
+  const url = await storeDataUrl(feedback.data, { dataDir, folder: 'student-feedback', name: name || '学习反馈' });
+  return { url, kind: feedback.kind, uploadedUrl: url };
+}
 function escapeXml(value) { return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[char]); }
 function hashPassword(password, salt = randomBytes(16).toString('hex')) { return `${salt}:${scryptSync(password, salt, 64).toString('hex')}`; }
 function verifyPassword(password, stored) {
@@ -279,7 +310,8 @@ function migrate() {
       status TEXT NOT NULL DEFAULT 'not_started', submitted_at TEXT, reviewed_at TEXT, reviewed_by INTEGER REFERENCES users(id),
       encouragement TEXT, created_at TEXT NOT NULL,
       series_id TEXT NOT NULL DEFAULT '', repeat_pattern TEXT NOT NULL DEFAULT '', repeat_weekdays TEXT NOT NULL DEFAULT '',
-      series_start_date TEXT NOT NULL DEFAULT '', series_end_date TEXT NOT NULL DEFAULT ''
+      series_start_date TEXT NOT NULL DEFAULT '', series_end_date TEXT NOT NULL DEFAULT '',
+      schedule_type TEXT NOT NULL DEFAULT 'single', available_start_date TEXT NOT NULL DEFAULT '', available_end_date TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS task_categories (
       id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, icon TEXT NOT NULL DEFAULT '✦',
@@ -287,7 +319,7 @@ function migrate() {
     );
     CREATE TABLE IF NOT EXISTS task_resources (
       id INTEGER PRIMARY KEY, name TEXT NOT NULL, mime TEXT NOT NULL, kind TEXT NOT NULL,
-      data TEXT NOT NULL, created_by INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL
+      data TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', created_by INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS task_templates (
       id INTEGER PRIMARY KEY, creator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -326,6 +358,7 @@ function migrate() {
   const taskColumns = new Set(db.prepare('PRAGMA table_info(tasks)').all().map(column => column.name));
   if (!taskColumns.has('feedback_kind')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_kind TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('feedback_data')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_data TEXT NOT NULL DEFAULT ''");
+  if (!taskColumns.has('feedback_url')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_url TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('feedback_name')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_name TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('feedback_note')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_note TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('resource_id')) db.exec('ALTER TABLE tasks ADD COLUMN resource_id INTEGER');
@@ -337,7 +370,13 @@ function migrate() {
   if (!taskColumns.has('repeat_weekdays')) db.exec("ALTER TABLE tasks ADD COLUMN repeat_weekdays TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('series_start_date')) db.exec("ALTER TABLE tasks ADD COLUMN series_start_date TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('series_end_date')) db.exec("ALTER TABLE tasks ADD COLUMN series_end_date TEXT NOT NULL DEFAULT ''");
+  if (!taskColumns.has('schedule_type')) db.exec("ALTER TABLE tasks ADD COLUMN schedule_type TEXT NOT NULL DEFAULT 'single'");
+  if (!taskColumns.has('available_start_date')) db.exec("ALTER TABLE tasks ADD COLUMN available_start_date TEXT NOT NULL DEFAULT ''");
+  if (!taskColumns.has('available_end_date')) db.exec("ALTER TABLE tasks ADD COLUMN available_end_date TEXT NOT NULL DEFAULT ''");
+  const resourceColumns = new Set(db.prepare('PRAGMA table_info(task_resources)').all().map(column => column.name));
+  if (!resourceColumns.has('url')) db.exec("ALTER TABLE task_resources ADD COLUMN url TEXT NOT NULL DEFAULT ''");
   db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_series ON tasks(series_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_student_availability ON tasks(student_id, schedule_type, available_start_date, available_end_date)');
   db.exec(`
     INSERT OR IGNORE INTO task_resource_links (task_id, resource_id, sort_order)
       SELECT id, resource_id, 0 FROM tasks WHERE resource_id IS NOT NULL;
@@ -383,17 +422,27 @@ function publicUser(user) { return { id: user.id, username: user.username, role:
 function linkedResources(ownerType, ownerId, legacyResourceId, includeData = false) {
   const table = ownerType === 'template' ? 'template_resource_links' : 'task_resource_links';
   const key = ownerType === 'template' ? 'template_id' : 'task_id';
-  let resources = db.prepare(`SELECT task_resources.id, task_resources.name, task_resources.mime, task_resources.kind${includeData ? ', task_resources.data' : ''}
+  let resources = db.prepare(`SELECT task_resources.id, task_resources.name, task_resources.mime, task_resources.kind${includeData ? ', task_resources.url, task_resources.data' : ''}
     FROM ${table} JOIN task_resources ON task_resources.id = ${table}.resource_id
     WHERE ${table}.${key} = ? ORDER BY ${table}.sort_order, task_resources.id`).all(ownerId);
   if (!resources.length && legacyResourceId) {
-    resources = db.prepare(`SELECT id, name, mime, kind${includeData ? ', data' : ''} FROM task_resources WHERE id = ?`).all(legacyResourceId);
+    resources = db.prepare(`SELECT id, name, mime, kind${includeData ? ', url, data' : ''} FROM task_resources WHERE id = ?`).all(legacyResourceId);
   }
-  return resources.map(resource => ({ id: resource.id, name: resource.name, mime: resource.mime, kind: resource.kind, ...(includeData ? { data: resource.data } : {}) }));
+  return resources.map(resource => ({ id: resource.id, name: resource.name, mime: resource.mime, kind: resource.kind, ...(includeData ? { data: resource.url || resource.data } : {}) }));
+}
+async function storeResources(resources, folder) {
+  const stored = [];
+  try {
+    for (const resource of resources) stored.push({ ...resource, url: await storeDataUrl(resource.data, { dataDir, folder, name: resource.name }) });
+    return stored;
+  } catch (error) {
+    await Promise.allSettled(stored.map(resource => deleteStoredUrl(resource.url, { dataDir })));
+    throw error;
+  }
 }
 function insertResources(resources, creatorId) {
-  const insert = db.prepare('INSERT INTO task_resources (name, mime, kind, data, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)');
-  return resources.map(resource => Number(insert.run(resource.name, resource.mime, resource.kind, resource.data, creatorId, now()).lastInsertRowid));
+  const insert = db.prepare("INSERT INTO task_resources (name, mime, kind, data, url, created_by, created_at) VALUES (?, ?, ?, '', ?, ?, ?)");
+  return resources.map(resource => Number(insert.run(resource.name, resource.mime, resource.kind, resource.url, creatorId, now()).lastInsertRowid));
 }
 function linkResources(ownerType, ownerId, resourceIds) {
   const table = ownerType === 'template' ? 'template_resource_links' : 'task_resource_links';
@@ -419,10 +468,14 @@ function taskJson(task, includeFeedback = false, includeResource = false) {
   const resource = resources[0];
   const resourceCount = hasSummary ? Number(task.resource_count) : resources.length;
   const repeatWeekdays = String(task.repeat_weekdays || '').split(',').map(Number).filter(day => day >= 1 && day <= 7);
-  const result = { id: task.id, studentId: task.student_id, title: task.title, category: task.category, icon: task.icon, color: task.category_color, detail: task.detail, date: task.task_date, duration: task.duration_minutes, stars: task.stars, feedbackType: task.feedback_type, needsReview: Boolean(task.needs_review), status: task.status, startedAt: task.started_at, draftUpdatedAt: task.draft_updated_at, submittedAt: task.submitted_at, encouragement: task.encouragement, studentName: task.student_name, studentAvatar: task.student_avatar, feedbackKind: task.feedback_kind || '', feedbackName: task.feedback_name || '', feedbackNote: task.feedback_note || '', hasFeedback: Boolean(task.feedback_data || task.feedback_note), hasResource: resourceCount > 0, resourceCount, resourceName: resource?.name || '', resourceMime: resource?.mime || '', resourceKind: resource?.kind || '', resources, isRecurring: Boolean(task.series_id), seriesId: task.series_id || '', repeatPattern: task.repeat_pattern || '', repeatWeekdays, seriesStartDate: task.series_start_date || '', seriesEndDate: task.series_end_date || '' };
-  if (includeFeedback) result.feedbackData = task.feedback_data || '';
+  const scheduleType = task.series_id ? 'repeat' : task.schedule_type || 'single';
+  const result = { id: task.id, studentId: task.student_id, title: task.title, category: task.category, icon: task.icon, color: task.category_color, detail: task.detail, date: task.task_date, duration: task.duration_minutes, stars: task.stars, feedbackType: task.feedback_type, needsReview: Boolean(task.needs_review), status: task.status, startedAt: task.started_at, draftUpdatedAt: task.draft_updated_at, submittedAt: task.submitted_at, encouragement: task.encouragement, studentName: task.student_name, studentAvatar: task.student_avatar, feedbackKind: task.feedback_kind || '', feedbackName: task.feedback_name || '', feedbackNote: task.feedback_note || '', hasFeedback: Boolean(task.feedback_url || task.feedback_data || task.feedback_note), hasResource: resourceCount > 0, resourceCount, resourceName: resource?.name || '', resourceMime: resource?.mime || '', resourceKind: resource?.kind || '', resources, scheduleType, isDateRange: scheduleType === 'range', availableStartDate: task.available_start_date || task.task_date, availableEndDate: task.available_end_date || task.task_date, isRecurring: Boolean(task.series_id), seriesId: task.series_id || '', repeatPattern: task.repeat_pattern || '', repeatWeekdays, seriesStartDate: task.series_start_date || '', seriesEndDate: task.series_end_date || '' };
+  if (includeFeedback) result.feedbackData = task.feedback_url || task.feedback_data || '';
   if (includeResource) result.resourceData = resource?.data || '';
   return result;
+}
+function taskVisibleOn(task, date) {
+  return task.isDateRange ? task.availableStartDate <= date && task.availableEndDate >= date : task.date === date;
 }
 function taskTemplateJson(template, includeResource = false) {
   const resources = linkedResources('template', template.id, template.resource_id, includeResource);
@@ -444,7 +497,7 @@ const templateSelectSql = `SELECT task_templates.*, task_categories.name AS cate
   task_categories.icon AS category_icon, task_categories.color AS category_color,
   users.display_name AS creator_name, task_resources.name AS resource_name,
   task_resources.mime AS resource_mime, task_resources.kind AS resource_kind,
-  task_resources.data AS resource_data
+  COALESCE(NULLIF(task_resources.url, ''), task_resources.data) AS resource_data
   FROM task_templates
   JOIN task_categories ON task_categories.id = task_templates.category_id AND task_categories.active = 1
   JOIN users ON users.id = task_templates.creator_id
@@ -455,7 +508,11 @@ function deleteUnusedResource(resourceId) {
   const usedByTemplate = db.prepare('SELECT 1 FROM task_templates WHERE resource_id = ? LIMIT 1').get(resourceId);
   const usedByTaskLink = db.prepare('SELECT 1 FROM task_resource_links WHERE resource_id = ? LIMIT 1').get(resourceId);
   const usedByTemplateLink = db.prepare('SELECT 1 FROM template_resource_links WHERE resource_id = ? LIMIT 1').get(resourceId);
-  if (!usedByTask && !usedByTemplate && !usedByTaskLink && !usedByTemplateLink) db.prepare('DELETE FROM task_resources WHERE id = ?').run(resourceId);
+  if (!usedByTask && !usedByTemplate && !usedByTaskLink && !usedByTemplateLink) {
+    const resource = db.prepare('SELECT url FROM task_resources WHERE id = ?').get(resourceId);
+    db.prepare('DELETE FROM task_resources WHERE id = ?').run(resourceId);
+    if (resource?.url) deleteStoredUrl(resource.url, { dataDir }).catch(error => console.error('清理存储文件失败：', error.message));
+  }
 }
 function studentsForParent(parentId, includeInactive = false) { return db.prepare(`SELECT users.id, users.display_name, users.avatar, users.active FROM parent_students JOIN users ON users.id = parent_students.student_id WHERE parent_students.parent_id = ? ${includeInactive ? '' : 'AND users.active = 1'}`).all(parentId); }
 function canManageStudent(user, studentId) { return user.role === 'admin' || studentsForParent(user.id, true).some(student => student.id === studentId); }
@@ -464,7 +521,7 @@ function studentListFor(user) {
     ? db.prepare("SELECT id, username, display_name, avatar, active FROM users WHERE role = 'student' ORDER BY id").all()
     : db.prepare(`SELECT users.id, users.username, users.display_name, users.avatar, users.active FROM parent_students JOIN users ON users.id = parent_students.student_id WHERE parent_students.parent_id = ? ORDER BY users.id`).all(user.id);
   const profile = db.prepare('SELECT grade, note FROM student_profiles WHERE student_id = ?');
-  const todayTask = db.prepare('SELECT COUNT(*) AS total, SUM(CASE WHEN status = \'completed\' THEN 1 ELSE 0 END) AS completed, SUM(CASE WHEN status = \'pending_review\' THEN 1 ELSE 0 END) AS pending FROM tasks WHERE student_id = ? AND task_date = ? AND is_demo = 0');
+  const todayTask = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed, SUM(CASE WHEN status = 'pending_review' THEN 1 ELSE 0 END) AS pending FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date = ?)) AND is_demo = 0");
   const rewardTotal = db.prepare('SELECT COALESCE(SUM(stars), 0) AS total FROM rewards WHERE student_id = ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))');
   const linkedParents = db.prepare(`SELECT users.id, users.username, users.display_name, users.avatar, users.active
     FROM parent_students JOIN users ON users.id = parent_students.parent_id
@@ -472,7 +529,7 @@ function studentListFor(user) {
   return students.map(student => ({
     ...student,
     ...(profile.get(student.id) || { grade: '三年级', note: '' }),
-    ...(todayTask.get(student.id, businessDate()) || { total: 0, completed: 0, pending: 0 }),
+    ...(todayTask.get(student.id, businessDate(), businessDate(), businessDate()) || { total: 0, completed: 0, pending: 0 }),
     growth: rewardBreakdown(rewardTotal.get(student.id).total),
     parents: linkedParents.all(student.id).filter(parent => user.role === 'admin' || parent.id === user.id).map(parent => ({ id: parent.id, username: parent.username, displayName: parent.display_name, avatar: parent.avatar, active: Boolean(parent.active) })),
     active: Boolean(student.active)
@@ -491,8 +548,14 @@ migrate();
 seed();
 ensureBuiltInAdmin();
 
-const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8' };
+const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.avif': 'image/avif', '.mp4': 'video/mp4', '.webm': 'video/webm', '.pdf': 'application/pdf', '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8' };
 function serveStatic(req, res, pathname) {
+  const uploaded = localUploadPath(dataDir, pathname);
+  if (uploaded) {
+    if (storageDriver() !== 'local' || !existsSync(uploaded)) { res.writeHead(404); res.end('Not found'); return; }
+    res.writeHead(200, { 'content-type': mimeTypes[extname(uploaded)] || 'application/octet-stream', 'x-content-type-options': 'nosniff', 'cache-control': 'public, max-age=31536000, immutable' });
+    createReadStream(uploaded).pipe(res); return;
+  }
   const requested = pathname === '/' ? '/index.html' : pathname;
   const file = normalize(join(root, requested));
   if (!file.startsWith(root) || !existsSync(file)) { res.writeHead(404); res.end('Not found'); return; }
@@ -505,7 +568,7 @@ const server = createServer(async (req, res) => {
   const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
   res.setHeader('x-frame-options', 'DENY');
   res.setHeader('referrer-policy', 'same-origin');
-  res.setHeader('content-security-policy', "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'self'; frame-ancestors 'none'");
+  res.setHeader('content-security-policy', "default-src 'self'; img-src 'self' data: https:; media-src 'self' data: https:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'");
   try {
     purgeEphemeralState();
     if (!url.pathname.startsWith('/api/')) { serveStatic(req, res, url.pathname); return; }
@@ -556,8 +619,8 @@ const server = createServer(async (req, res) => {
       const date = clean(url.searchParams.get('date') || businessDate(), 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { bad(res, 400, '日期格式不正确'); return; }
       const week = weekRange(date);
-      const weekRows = db.prepare(`SELECT tasks.*, ${taskResourceSummarySql} FROM tasks WHERE student_id = ? AND task_date BETWEEN ? AND ? AND is_demo = 0 ORDER BY task_date, CASE status WHEN 'not_started' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'needs_more' THEN 3 WHEN 'pending_review' THEN 4 ELSE 5 END, id`).all(user.id, week.start, week.end).map(taskJson);
-      const weekTasks = Object.fromEntries(dateRange(week.start, week.end).map(day => [day, weekRows.filter(task => task.date === day)]));
+      const weekRows = db.prepare(`SELECT tasks.*, ${taskResourceSummarySql} FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0 ORDER BY task_date, CASE status WHEN 'not_started' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'needs_more' THEN 3 WHEN 'pending_review' THEN 4 ELSE 5 END, id`).all(user.id, week.end, week.start, week.start, week.end).map(taskJson);
+      const weekTasks = Object.fromEntries(dateRange(week.start, week.end).map(day => [day, weekRows.filter(task => taskVisibleOn(task, day))]));
       const tasks = weekTasks[date] || [];
       const taskDates = Object.entries(weekTasks).filter(([, dayTasks]) => dayTasks.length).map(([day]) => day);
       const rewards = db.prepare('SELECT rewards.*, tasks.title FROM rewards LEFT JOIN tasks ON tasks.id = rewards.task_id WHERE rewards.student_id = ? AND (rewards.task_id IS NULL OR tasks.is_demo = 0) ORDER BY rewards.id DESC LIMIT 10').all(user.id);
@@ -572,8 +635,8 @@ const server = createServer(async (req, res) => {
       const week = weekRange(currentDate);
       const filters = {
         overdue: { sql: "task_date BETWEEN ? AND ? AND task_date < ? AND status IN ('not_started','in_progress','needs_more')", args: [week.start, week.end, currentDate] },
-        todo: { sql: "task_date = ? AND status IN ('not_started','in_progress','needs_more')", args: [currentDate] },
-        future: { sql: "task_date > ? AND status IN ('not_started','in_progress','needs_more')", args: [currentDate] },
+        todo: { sql: "((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date = ?)) AND status IN ('not_started','in_progress','needs_more')", args: [currentDate, currentDate, currentDate] },
+        future: { sql: "((schedule_type = 'range' AND available_start_date > ?) OR (schedule_type <> 'range' AND task_date > ?)) AND status IN ('not_started','in_progress','needs_more')", args: [currentDate, currentDate] },
         pending_review: { sql: "status = 'pending_review'", args: [] },
         completed: { sql: "status = 'completed'", args: [] }
       };
@@ -598,14 +661,21 @@ const server = createServer(async (req, res) => {
       const task = db.prepare('SELECT * FROM tasks WHERE id = ? AND student_id = ? AND is_demo = 0').get(taskId, user.id);
       if (!task) { bad(res, 404, '任务不存在'); return; }
       if (['completed', 'pending_review'].includes(task.status)) { bad(res, 409, task.status === 'completed' ? '任务已完成' : '任务正在等待审核'); return; }
+      if (task.schedule_type === 'range' && (businessDate() < task.available_start_date || businessDate() > task.available_end_date)) { bad(res, 409, '当前不在该任务的可完成日期范围内'); return; }
       const body = await readBody(req, 6 * 1024 * 1024);
-      const rawFeedback = typeof body.feedbackData === 'string' ? body.feedbackData : task.feedback_data;
-      const feedback = rawFeedback ? normalizeTaskFeedback(rawFeedback) : null;
-      if (rawFeedback && !feedback) { bad(res, 400, '反馈文件格式不正确或超过 4 MB'); return; }
+      const rawFeedback = typeof body.feedbackData === 'string' ? body.feedbackData : task.feedback_url || task.feedback_data;
       const feedbackName = Object.hasOwn(body, 'feedbackName') ? clean(body.feedbackName, 120) : task.feedback_name;
+      const feedback = await feedbackValue(rawFeedback, task, feedbackName);
+      if (rawFeedback && !feedback) { bad(res, 400, '反馈文件格式不正确或超过 4 MB'); return; }
       const feedbackNote = Object.hasOwn(body, 'feedbackNote') ? clean(body.feedbackNote, 300) : task.feedback_note;
       const time = now();
-      db.prepare("UPDATE tasks SET status = 'in_progress', started_at = COALESCE(started_at, ?), draft_updated_at = ?, feedback_kind = ?, feedback_data = ?, feedback_name = ?, feedback_note = ? WHERE id = ?").run(time, time, feedback?.kind || '', feedback?.data || '', feedbackName, feedbackNote, task.id);
+      try {
+        db.prepare("UPDATE tasks SET status = 'in_progress', started_at = COALESCE(started_at, ?), draft_updated_at = ?, feedback_kind = ?, feedback_data = '', feedback_url = ?, feedback_name = ?, feedback_note = ? WHERE id = ?").run(time, time, feedback?.kind || '', feedback?.url || '', feedbackName, feedbackNote, task.id);
+      } catch (error) {
+        if (feedback?.uploadedUrl) await deleteStoredUrl(feedback.uploadedUrl, { dataDir }).catch(() => {});
+        throw error;
+      }
+      if (task.feedback_url && task.feedback_url !== feedback?.url) deleteStoredUrl(task.feedback_url, { dataDir }).catch(error => console.error('清理旧反馈文件失败：', error.message));
       json(res, 200, { task: taskJson(db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id), true, true) });
       return;
     }
@@ -615,15 +685,23 @@ const server = createServer(async (req, res) => {
       const task = db.prepare('SELECT * FROM tasks WHERE id = ? AND student_id = ? AND is_demo = 0').get(taskId, user.id);
       if (!task) { bad(res, 404, '任务不存在'); return; }
       if (['completed', 'pending_review'].includes(task.status)) { bad(res, 409, task.status === 'completed' ? '任务已完成' : '任务正在等待审核'); return; }
+      if (task.schedule_type === 'range' && (businessDate() < task.available_start_date || businessDate() > task.available_end_date)) { bad(res, 409, '当前不在该任务的可完成日期范围内'); return; }
       const body = await readBody(req, 6 * 1024 * 1024);
-      const feedback = normalizeTaskFeedback(body.feedbackData);
+      const feedbackName = clean(body.feedbackName, 120);
+      const feedback = await feedbackValue(body.feedbackData, task, feedbackName);
       const feedbackNote = clean(body.feedbackNote, 300);
       if (task.feedback_type !== 'none') {
         if (!feedback) { bad(res, 400, '请按任务要求上传学习反馈，文件最大 4 MB'); return; }
         if (task.feedback_type === 'photo' && feedback.kind !== 'image') { bad(res, 400, '该任务需要上传图片反馈'); return; }
         if (task.feedback_type === 'video' && feedback.kind !== 'video') { bad(res, 400, '该任务需要上传视频反馈'); return; }
       }
-      db.prepare('UPDATE tasks SET status = ?, submitted_at = ?, feedback_kind = ?, feedback_data = ?, feedback_name = ?, feedback_note = ? WHERE id = ?').run(task.needs_review ? 'pending_review' : 'completed', now(), feedback?.kind || '', feedback?.data || '', clean(body.feedbackName, 120), feedbackNote, task.id);
+      try {
+        db.prepare("UPDATE tasks SET status = ?, submitted_at = ?, feedback_kind = ?, feedback_data = '', feedback_url = ?, feedback_name = ?, feedback_note = ? WHERE id = ?").run(task.needs_review ? 'pending_review' : 'completed', now(), feedback?.kind || '', feedback?.url || '', feedbackName, feedbackNote, task.id);
+      } catch (error) {
+        if (feedback?.uploadedUrl) await deleteStoredUrl(feedback.uploadedUrl, { dataDir }).catch(() => {});
+        throw error;
+      }
+      if (task.feedback_url && task.feedback_url !== feedback?.url) deleteStoredUrl(task.feedback_url, { dataDir }).catch(error => console.error('清理旧反馈文件失败：', error.message));
       if (!task.needs_review) db.prepare('INSERT INTO rewards (student_id, task_id, stars, message, created_at) VALUES (?, ?, ?, ?, ?)').run(user.id, task.id, task.stars, '完成得很棒！', now());
       json(res, 200, { task: taskJson(db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id)) });
       return;
@@ -644,8 +722,8 @@ const server = createServer(async (req, res) => {
       const pending = db.prepare(`SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.student_id = ? AND tasks.status = 'pending_review' AND tasks.is_demo = 0 ORDER BY tasks.submitted_at`).all(studentId).map(taskJson);
       const currentDate = businessDate();
       const week = weekRange(currentDate);
-      const todayTasks = db.prepare('SELECT status FROM tasks WHERE student_id = ? AND task_date = ? AND is_demo = 0').all(studentId, currentDate);
-      const weekTasks = db.prepare('SELECT status, task_date FROM tasks WHERE student_id = ? AND task_date BETWEEN ? AND ? AND is_demo = 0').all(studentId, week.start, week.end);
+      const todayTasks = db.prepare("SELECT status FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date = ?)) AND is_demo = 0").all(studentId, currentDate, currentDate, currentDate);
+      const weekTasks = db.prepare("SELECT status, task_date FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0").all(studentId, week.end, week.start, week.start, week.end);
       const weekStars = Number(db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND substr(created_at, 1, 10) BETWEEN ? AND ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(studentId, week.start, week.end).total);
       const totalStars = Number(db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(studentId).total);
       json(res, 200, {
@@ -683,13 +761,18 @@ const server = createServer(async (req, res) => {
       const displayName = clean(body.displayName, 24);
       const username = clean(body.username, 48);
       const password = typeof body.password === 'string' ? body.password : '';
-      const uploadedAvatar = normalizeAvatar(body.avatar);
-      const avatar = isImageAvatar(uploadedAvatar) ? uploadedAvatar : avatarInitial(displayName);
       if (displayName.length < 2 || username.length < 3 || password.length < 10) { bad(res, 400, '请填写 2 至 24 位昵称、至少 3 位用户名和至少 10 位初始密码'); return; }
       if (!/^[A-Za-z0-9_.-]+$/.test(username)) { bad(res, 400, '用户名只能包含字母、数字、点、下划线和短横线'); return; }
       if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) { bad(res, 400, '密码至少 10 位，并包含字母和数字'); return; }
       if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) { bad(res, 409, '该用户名已被使用'); return; }
-      const result = db.prepare("INSERT INTO users (username, password_hash, role, display_name, avatar, active, must_change_password, created_at) VALUES (?, ?, 'parent', ?, ?, 1, 0, ?)").run(username, hashPassword(password), displayName, avatar, now());
+      const avatarResult = await avatarValue(body.avatar, '', displayName);
+      let result;
+      try {
+        result = db.prepare("INSERT INTO users (username, password_hash, role, display_name, avatar, active, must_change_password, created_at) VALUES (?, ?, 'parent', ?, ?, 1, 0, ?)").run(username, hashPassword(password), displayName, avatarResult.avatar, now());
+      } catch (error) {
+        if (avatarResult.uploadedUrl) await deleteStoredUrl(avatarResult.uploadedUrl, { dataDir }).catch(() => {});
+        throw error;
+      }
       json(res, 201, { parent: parentList().find(parent => parent.id === Number(result.lastInsertRowid)) });
       return;
     }
@@ -701,10 +784,12 @@ const server = createServer(async (req, res) => {
       const current = db.prepare("SELECT avatar FROM users WHERE id = ? AND role = 'parent'").get(parentId);
       if (!current) { bad(res, 404, '家长账号不存在'); return; }
       if (displayName.length < 2) { bad(res, 400, '家长昵称需为 2 至 24 个字符'); return; }
-      const requestedAvatar = normalizeAvatar(body.avatar);
-      const avatar = isImageAvatar(requestedAvatar) ? requestedAvatar : isImageAvatar(current.avatar) ? current.avatar : avatarInitial(displayName);
-      const result = db.prepare("UPDATE users SET display_name = ?, avatar = ? WHERE id = ? AND role = 'parent'").run(displayName, avatar, parentId);
+      const avatarResult = await avatarValue(body.avatar, current.avatar, displayName);
+      let result;
+      try { result = db.prepare("UPDATE users SET display_name = ?, avatar = ? WHERE id = ? AND role = 'parent'").run(displayName, avatarResult.avatar, parentId); }
+      catch (error) { if (avatarResult.uploadedUrl) await deleteStoredUrl(avatarResult.uploadedUrl, { dataDir }).catch(() => {}); throw error; }
       if (!result.changes) { bad(res, 404, '家长账号不存在'); return; }
+      if (avatarResult.uploadedUrl && isStoredFileUrl(current.avatar)) deleteStoredUrl(current.avatar, { dataDir }).catch(error => console.error('清理旧头像失败：', error.message));
       json(res, 200, { parent: parentList().find(parent => parent.id === parentId) });
       return;
     }
@@ -802,8 +887,6 @@ const server = createServer(async (req, res) => {
       const displayName = clean(body.displayName, 12);
       const username = clean(body.username, 48);
       const password = typeof body.password === 'string' ? body.password : '';
-      const uploadedAvatar = normalizeAvatar(body.avatar);
-      const avatar = isImageAvatar(uploadedAvatar) ? uploadedAvatar : avatarInitial(displayName, '学');
       const grade = clean(body.grade, 12) || '三年级';
       const note = clean(body.note, 160);
       if (displayName.length < 2 || username.length < 3 || password.length < 10) { bad(res, 400, '请填写 2 至 12 位昵称、至少 3 位用户名和至少 10 位初始密码'); return; }
@@ -814,16 +897,17 @@ const server = createServer(async (req, res) => {
         ? [...new Set((Array.isArray(body.parentIds) ? body.parentIds : body.parentId ? [body.parentId] : []).map(Number).filter(Number.isInteger))]
         : [user.id];
       if (requestedParentIds.some(parentId => !db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'parent'").get(parentId))) { bad(res, 400, '请选择有效的家长账号'); return; }
+      const avatarResult = await avatarValue(body.avatar, '', displayName, '学');
       let studentId;
       db.exec('BEGIN');
       try {
-        const result = db.prepare('INSERT INTO users (username, password_hash, role, display_name, avatar, created_at) VALUES (?, ?, \'student\', ?, ?, ?)').run(username, hashPassword(password), displayName, avatar, now());
+        const result = db.prepare('INSERT INTO users (username, password_hash, role, display_name, avatar, created_at) VALUES (?, ?, \'student\', ?, ?, ?)').run(username, hashPassword(password), displayName, avatarResult.avatar, now());
         studentId = Number(result.lastInsertRowid);
         db.prepare('INSERT INTO student_profiles (student_id, grade, note) VALUES (?, ?, ?)').run(studentId, grade, note);
         const link = db.prepare('INSERT INTO parent_students (parent_id, student_id, is_primary) VALUES (?, ?, ?)');
         requestedParentIds.forEach((parentId, index) => link.run(parentId, studentId, index === 0 ? 1 : 0));
         db.exec('COMMIT');
-      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      } catch (error) { db.exec('ROLLBACK'); if (avatarResult.uploadedUrl) await deleteStoredUrl(avatarResult.uploadedUrl, { dataDir }).catch(() => {}); throw error; }
       json(res, 201, { student: studentListFor(user).find(student => student.id === studentId) });
       return;
     }
@@ -835,14 +919,18 @@ const server = createServer(async (req, res) => {
       const displayName = clean(body.displayName, 12);
       const current = db.prepare("SELECT avatar FROM users WHERE id = ? AND role = 'student'").get(studentId);
       if (!current) { bad(res, 404, '学生账号不存在'); return; }
-      const requestedAvatar = normalizeAvatar(body.avatar);
-      const avatar = isImageAvatar(requestedAvatar) ? requestedAvatar : isImageAvatar(current.avatar) ? current.avatar : avatarInitial(displayName, '学');
       const grade = clean(body.grade, 12) || '三年级';
       const note = clean(body.note, 160);
       if (displayName.length < 2) { bad(res, 400, '学生昵称需为 2 至 12 个字符'); return; }
       if (!['一年级', '二年级', '三年级', '四年级', '五年级', '六年级'].includes(grade)) { bad(res, 400, '请选择有效年级'); return; }
-      db.prepare('UPDATE users SET display_name = ?, avatar = ? WHERE id = ? AND role = \'student\'').run(displayName, avatar, studentId);
-      db.prepare('INSERT INTO student_profiles (student_id, grade, note) VALUES (?, ?, ?) ON CONFLICT(student_id) DO UPDATE SET grade = excluded.grade, note = excluded.note').run(studentId, grade, note);
+      const avatarResult = await avatarValue(body.avatar, current.avatar, displayName, '学');
+      db.exec('BEGIN');
+      try {
+        db.prepare('UPDATE users SET display_name = ?, avatar = ? WHERE id = ? AND role = \'student\'').run(displayName, avatarResult.avatar, studentId);
+        db.prepare('INSERT INTO student_profiles (student_id, grade, note) VALUES (?, ?, ?) ON CONFLICT(student_id) DO UPDATE SET grade = excluded.grade, note = excluded.note').run(studentId, grade, note);
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); if (avatarResult.uploadedUrl) await deleteStoredUrl(avatarResult.uploadedUrl, { dataDir }).catch(() => {}); throw error; }
+      if (avatarResult.uploadedUrl && isStoredFileUrl(current.avatar)) deleteStoredUrl(current.avatar, { dataDir }).catch(error => console.error('清理旧头像失败：', error.message));
       json(res, 200, { student: studentListFor(user).find(student => student.id === studentId) });
       return;
     }
@@ -910,9 +998,10 @@ const server = createServer(async (req, res) => {
       if (!resources) { bad(res, 400, taskResourceValidationMessage(body)); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
+      const storedResources = await storeResources(resources, 'task-templates');
       db.exec('BEGIN');
       try {
-        const resourceIds = insertResources(resources, user.id);
+        const resourceIds = insertResources(storedResources, user.id);
         const resourceId = resourceIds[0] || null;
         const createdAt = now();
         const result = db.prepare(`INSERT INTO task_templates (creator_id,title,category_id,detail,duration_minutes,stars,feedback_type,needs_review,resource_id,is_public,created_at,updated_at)
@@ -921,7 +1010,7 @@ const server = createServer(async (req, res) => {
         db.exec('COMMIT');
         const template = db.prepare(`${templateSelectSql} WHERE task_templates.id = ?`).get(Number(result.lastInsertRowid));
         json(res, 201, { template: taskTemplateJson({ ...template, is_owner: true }) });
-      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      } catch (error) { db.exec('ROLLBACK'); await Promise.allSettled(storedResources.map(resource => deleteStoredUrl(resource.url, { dataDir }))); throw error; }
       return;
     }
     if (req.method === 'PATCH' && /^\/api\/parent\/task-templates\/\d+$/.test(url.pathname)) {
@@ -950,13 +1039,14 @@ const server = createServer(async (req, res) => {
       if (existingResourceIds.some(id => !allowedResourceIds.has(id))) { bad(res, 403, '无权引用该任务资料'); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
+      const storedResources = replaceResources ? await storeResources(resources, 'task-templates') : [];
       let resourceId = current.resource_id;
       db.exec('BEGIN');
       try {
         const previousIds = db.prepare('SELECT resource_id FROM template_resource_links WHERE template_id = ?').all(templateId).map(row => row.resource_id);
         if (replaceResources) {
           db.prepare('DELETE FROM template_resource_links WHERE template_id = ?').run(templateId);
-          const resourceIds = [...existingResourceIds, ...insertResources(resources, user.id)];
+          const resourceIds = [...existingResourceIds, ...insertResources(storedResources, user.id)];
           resourceId = resourceIds[0] || null;
           linkResources('template', templateId, resourceIds);
         }
@@ -964,7 +1054,7 @@ const server = createServer(async (req, res) => {
           .run(title, categoryId, detail || '请按照任务要求认真完成。', duration, stars, feedbackType, body.needsReview === false ? 0 : 1, resourceId, body.isPublic === true ? 1 : 0, now(), templateId);
         if (replaceResources) [...new Set([...previousIds, current.resource_id].filter(Boolean))].forEach(deleteUnusedResource);
         db.exec('COMMIT');
-      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      } catch (error) { db.exec('ROLLBACK'); await Promise.allSettled(storedResources.map(resource => deleteStoredUrl(resource.url, { dataDir }))); throw error; }
       const template = db.prepare(`${templateSelectSql} WHERE task_templates.id = ?`).get(templateId);
       json(res, 200, { template: taskTemplateJson({ ...template, is_owner: true }) });
       return;
@@ -990,19 +1080,19 @@ const server = createServer(async (req, res) => {
       const schedule = taskSchedule(body);
       if (!templateIds.length || templateIds.length > 30) { bad(res, 400, '请选择 1 至 30 个任务模板'); return; }
       if (!studentIds.length || studentIds.some(id => !allowedIds.includes(id))) { bad(res, 403, '请选择有权限的正常学生账号'); return; }
-      if (!schedule) { bad(res, 400, '请设置有效的分配日期；重复日期需填写结束日期并选择重复星期，范围最多 30 天'); return; }
+      if (!schedule) { bad(res, 400, '请设置有效的分配日期；持续日期和重复日期都必须填写有效的结束日期'); return; }
       if (templateIds.length * studentIds.length * schedule.dates.length > 1000) { bad(res, 400, '本次生成任务过多，请减少模板、学生或日期数量'); return; }
       const placeholders = templateIds.map(() => '?').join(',');
       const templates = db.prepare(`${templateSelectSql} WHERE task_templates.id IN (${placeholders}) AND (task_templates.creator_id = ? OR task_templates.is_public = 1)`).all(...templateIds, user.id);
       if (templates.length !== templateIds.length) { bad(res, 403, '所选模板不存在或当前账号无权使用'); return; }
-      const insert = db.prepare(`INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,resource_id,status,created_at,series_id,repeat_pattern,repeat_weekdays,series_start_date,series_end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', ?, ?, ?, ?, ?, ?)`);
+      const insert = db.prepare(`INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,resource_id,status,created_at,series_id,repeat_pattern,repeat_weekdays,series_start_date,series_end_date,schedule_type,available_start_date,available_end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const taskIds = [];
       db.exec('BEGIN');
       try {
         for (const template of templates) for (const studentId of studentIds) {
           const seriesId = schedule.scheduleType === 'repeat' ? randomBytes(12).toString('hex') : '';
           for (const date of schedule.dates) {
-            const taskId = Number(insert.run(studentId, template.title, template.category_name, template.category_icon, template.category_color, template.detail, date, template.duration_minutes, template.stars, template.feedback_type, template.needs_review, template.resource_id, now(), seriesId, schedule.repeatPattern, schedule.weekdays.join(','), schedule.startDate, schedule.endDate).lastInsertRowid);
+            const taskId = Number(insert.run(studentId, template.title, template.category_name, template.category_icon, template.category_color, template.detail, date, template.duration_minutes, template.stars, template.feedback_type, template.needs_review, template.resource_id, now(), seriesId, schedule.repeatPattern, schedule.weekdays.join(','), schedule.startDate, schedule.endDate, schedule.scheduleType, schedule.scheduleType === 'range' ? schedule.startDate : date, schedule.scheduleType === 'range' ? schedule.endDate : date).lastInsertRowid);
             const resourceIds = linkedResources('template', template.id, template.resource_id).map(resource => resource.id);
             linkResources('task', taskId, resourceIds);
             taskIds.push(taskId);
@@ -1063,12 +1153,12 @@ const server = createServer(async (req, res) => {
       if (studentId && !allowedIds.includes(studentId)) { bad(res, 403, '无权查看该学生任务'); return; }
       if (!allowedIds.length) { json(res, 200, { tasks: [] }); return; }
       const week = weekRange(date);
-      const baseSql = `SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.task_date BETWEEN ? AND ? AND tasks.is_demo = 0`;
+      const baseSql = `SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE ((tasks.schedule_type = 'range' AND tasks.available_start_date <= ? AND tasks.available_end_date >= ?) OR (tasks.schedule_type <> 'range' AND tasks.task_date BETWEEN ? AND ?)) AND tasks.is_demo = 0`;
       const weekRows = studentId
-        ? db.prepare(`${baseSql} AND tasks.student_id = ? ORDER BY tasks.task_date, tasks.id DESC`).all(week.start, week.end, studentId)
-        : db.prepare(`${baseSql} AND tasks.student_id IN (${allowedIds.map(() => '?').join(',')}) ORDER BY tasks.task_date, users.display_name, tasks.id DESC`).all(week.start, week.end, ...allowedIds);
+        ? db.prepare(`${baseSql} AND tasks.student_id = ? ORDER BY tasks.task_date, tasks.id DESC`).all(week.end, week.start, week.start, week.end, studentId)
+        : db.prepare(`${baseSql} AND tasks.student_id IN (${allowedIds.map(() => '?').join(',')}) ORDER BY tasks.task_date, users.display_name, tasks.id DESC`).all(week.end, week.start, week.start, week.end, ...allowedIds);
       const serialized = weekRows.map(taskJson);
-      const weekTasks = Object.fromEntries(dateRange(week.start, week.end).map(day => [day, serialized.filter(task => task.date === day)]));
+      const weekTasks = Object.fromEntries(dateRange(week.start, week.end).map(day => [day, serialized.filter(task => taskVisibleOn(task, day))]));
       const taskDates = Object.entries(weekTasks).filter(([, dayTasks]) => dayTasks.length).map(([day]) => day);
       json(res, 200, { tasks: weekTasks[date] || [], taskDates, weekTasks });
       return;
@@ -1096,27 +1186,28 @@ const server = createServer(async (req, res) => {
       const duration = Number(body.duration);
       const stars = Number(body.stars);
       const resources = normalizeTaskResources(body);
-      if (title.length < 2 || !schedule) { bad(res, 400, '请填写任务标题和有效日期；重复日期需填写结束日期并选择重复星期，范围最多 30 天'); return; }
+      if (title.length < 2 || !schedule) { bad(res, 400, '请填写任务标题和有效日期；持续日期和重复日期都必须填写有效的结束日期'); return; }
       if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
       if (!resources) { bad(res, 400, taskResourceValidationMessage(body)); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
-      const insert = db.prepare(`INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,resource_id,status,created_at,series_id,repeat_pattern,repeat_weekdays,series_start_date,series_end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', ?, ?, ?, ?, ?, ?)`);
+      const storedResources = await storeResources(resources, 'task-resources');
+      const insert = db.prepare(`INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,resource_id,status,created_at,series_id,repeat_pattern,repeat_weekdays,series_start_date,series_end_date,schedule_type,available_start_date,available_end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const taskIds = [];
       db.exec('BEGIN');
       try {
-        const resourceIds = insertResources(resources, user.id);
+        const resourceIds = insertResources(storedResources, user.id);
         const resourceId = resourceIds[0] || null;
         for (const studentId of studentIds) {
           const seriesId = schedule.scheduleType === 'repeat' ? randomBytes(12).toString('hex') : '';
           for (const date of schedule.dates) {
-            const taskId = Number(insert.run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', date, duration, stars, clean(body.feedbackType, 30) || 'photo_or_video', body.needsReview === false ? 0 : 1, resourceId, now(), seriesId, schedule.repeatPattern, schedule.weekdays.join(','), schedule.startDate, schedule.endDate).lastInsertRowid);
+            const taskId = Number(insert.run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', date, duration, stars, clean(body.feedbackType, 30) || 'photo_or_video', body.needsReview === false ? 0 : 1, resourceId, now(), seriesId, schedule.repeatPattern, schedule.weekdays.join(','), schedule.startDate, schedule.endDate, schedule.scheduleType, schedule.scheduleType === 'range' ? schedule.startDate : date, schedule.scheduleType === 'range' ? schedule.endDate : date).lastInsertRowid);
             linkResources('task', taskId, resourceIds);
             taskIds.push(taskId);
           }
         }
         db.exec('COMMIT');
-      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      } catch (error) { db.exec('ROLLBACK'); await Promise.allSettled(storedResources.map(resource => deleteStoredUrl(resource.url, { dataDir }))); throw error; }
       json(res, 201, { count: taskIds.length, taskIds });
       return;
     }
@@ -1140,8 +1231,8 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req, 45 * 1024 * 1024);
       const studentId = Number(body.studentId);
       const allowedIds = (user.role === 'admin' ? db.prepare("SELECT id FROM users WHERE role = 'student' AND active = 1").all() : studentsForParent(user.id)).map(student => Number(student.id));
-      const date = clean(body.date || body.startDate, 10);
       const scopeSeries = Boolean(task.series_id && body.scope === 'series');
+      const schedule = scopeSeries ? null : taskSchedule(body);
       const title = clean(body.title, 80);
       const detail = clean(body.detail, 300);
       const category = db.prepare('SELECT name, icon, color FROM task_categories WHERE id = ? AND active = 1').get(Number(body.categoryId));
@@ -1153,7 +1244,7 @@ const server = createServer(async (req, res) => {
       const replaceResources = Array.isArray(body.resources) || Array.isArray(body.existingResourceIds) || Boolean(body.resourceData) || body.removeResource === true;
       if (!allowedIds.includes(studentId)) { bad(res, 403, '请选择有权限的正常学生账号'); return; }
       if (scopeSeries && studentId !== task.student_id) { bad(res, 400, '重复任务系列不能更换学生'); return; }
-      if (title.length < 2 || (!scopeSeries && dateRange(date, date).length !== 1)) { bad(res, 400, '请填写任务标题和有效日期'); return; }
+      if (title.length < 2 || (!scopeSeries && !schedule)) { bad(res, 400, '请填写任务标题和有效日期范围'); return; }
       if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
       if (!['photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
       if (!resources) { bad(res, 400, taskResourceValidationMessage(body)); return; }
@@ -1162,6 +1253,7 @@ const server = createServer(async (req, res) => {
       if (existingResourceIds.some(id => !allowedResourceIds.has(id))) { bad(res, 403, '无权引用该任务资料'); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
+      const storedResources = replaceResources ? await storeResources(resources, 'task-resources') : [];
       const targets = scopeSeries
         ? db.prepare("SELECT * FROM tasks WHERE series_id = ? AND student_id = ? AND is_demo = 0 AND status NOT IN ('pending_review','completed') ORDER BY task_date").all(task.series_id, task.student_id)
         : [task];
@@ -1175,16 +1267,16 @@ const server = createServer(async (req, res) => {
         const legacyIds = targets.map(item => item.resource_id).filter(Boolean);
         if (replaceResources) {
           db.prepare(`DELETE FROM task_resource_links WHERE task_id IN (${placeholders})`).run(...targetIds);
-          const resourceIds = [...existingResourceIds, ...insertResources(resources, user.id)];
+          const resourceIds = [...existingResourceIds, ...insertResources(storedResources, user.id)];
           const resourceId = resourceIds[0] || null;
           targetIds.forEach(id => linkResources('task', id, resourceIds));
           db.prepare(`UPDATE tasks SET resource_id = ? WHERE id IN (${placeholders})`).run(resourceId, ...targetIds);
         }
         if (scopeSeries) db.prepare(`UPDATE tasks SET title = ?, category = ?, icon = ?, category_color = ?, detail = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ? WHERE id IN (${placeholders})`).run(title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', duration, stars, feedbackType, body.needsReview === false ? 0 : 1, ...targetIds);
-        else db.prepare('UPDATE tasks SET student_id = ?, title = ?, category = ?, icon = ?, category_color = ?, detail = ?, task_date = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ? WHERE id = ?').run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', date, duration, stars, feedbackType, body.needsReview === false ? 0 : 1, taskId);
+        else db.prepare('UPDATE tasks SET student_id = ?, title = ?, category = ?, icon = ?, category_color = ?, detail = ?, task_date = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ?, schedule_type = ?, available_start_date = ?, available_end_date = ? WHERE id = ?').run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', schedule.taskDate, duration, stars, feedbackType, body.needsReview === false ? 0 : 1, schedule.scheduleType, schedule.startDate, schedule.endDate, taskId);
         if (replaceResources) [...new Set([...previousIds, ...legacyIds])].forEach(deleteUnusedResource);
         db.exec('COMMIT');
-      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      } catch (error) { db.exec('ROLLBACK'); await Promise.allSettled(storedResources.map(resource => deleteStoredUrl(resource.url, { dataDir }))); throw error; }
       const updated = db.prepare('SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.id = ?').get(taskId);
       json(res, 200, { task: taskJson(updated), updatedCount: targetIds.length, skippedCount: seriesTotal - targetIds.length });
       return;

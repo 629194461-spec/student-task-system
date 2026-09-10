@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 const base = process.env.TEST_BASE_URL || 'http://127.0.0.1:4182';
 const avatar = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
@@ -77,7 +79,11 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal(studentDetailBeforeStart.response.status, 200);
   assert.equal(studentDetailBeforeStart.body.task.status, 'not_started', 'viewing details must not start a task');
   assert.equal(studentDetailBeforeStart.body.task.resources[0].name, parentFile.name);
-  assert.equal(studentDetailBeforeStart.body.task.resources[0].data, parentFile.data, 'student detail must include downloadable parent files');
+  const parentFileUrl = studentDetailBeforeStart.body.task.resources[0].data;
+  assert.match(parentFileUrl, /^\/uploads\//, 'student detail must include a storage URL, not Base64');
+  const parentFileDownload = await fetch(`${base}${parentFileUrl}`);
+  assert.equal(parentFileDownload.status, 200);
+  assert.equal(Buffer.from(await parentFileDownload.arrayBuffer()).toString('base64'), parentFile.data.split(',')[1]);
   const parentDetail = await request(`/api/parent/tasks/${draftId}`, { cookie: admin });
   assert.equal(parentDetail.response.status, 200);
   assert.equal(parentDetail.body.task.id, draftId);
@@ -106,13 +112,14 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal(edited.body.task.status, 'in_progress');
   const detail = await request(`/api/student/tasks/${draftId}`, { cookie: firstLogin.cookie });
   assert.equal(detail.body.task.feedbackNote, '已经完成一半');
-  assert.equal(detail.body.task.resources[0].data, parentFile.data, 'editing task fields must preserve unchanged attachments');
+  assert.equal(detail.body.task.resources[0].data, parentFileUrl, 'editing task fields must preserve unchanged attachment URLs');
 
   const pending = await request(`/api/student/tasks/${draftId}/submit`, { cookie: firstLogin.cookie, method: 'POST', body: JSON.stringify({ feedbackData: avatar, feedbackName: '学习成果.png', feedbackNote: '已完成' }) });
   assert.equal(pending.body.task.status, 'pending_review');
   const submittedDetail = await request(`/api/parent/tasks/${draftId}`, { cookie: admin });
   assert.equal(submittedDetail.body.task.feedbackName, '学习成果.png');
-  assert.equal(submittedDetail.body.task.feedbackData, avatar, 'parent detail must include downloadable student feedback');
+  assert.match(submittedDetail.body.task.feedbackData, /^\/uploads\//, 'parent detail must include a stored student feedback URL');
+  assert.equal((await fetch(`${base}${submittedDetail.body.task.feedbackData}`)).status, 200);
   const editPending = await request(`/api/parent/tasks/${draftId}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ studentId: firstId, title: '不应保存', categoryId, duration: 10, stars: 1, feedbackType: 'none', needsReview: true, date: currentDate }) });
   assert.equal(editPending.response.status, 409);
   const completedId = completedTask.body.taskIds[0];
@@ -177,6 +184,58 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal((await request(`/api/parent/tasks/${lockedRecurringId}`, { cookie: admin })).response.status, 200, 'pending review occurrence must be preserved');
   assert.equal((await request(`/api/parent/tasks/${editableRecurringId}`, { cookie: admin })).response.status, 404);
 
+  const rangeStart = addDays(currentDate, -2);
+  const rangeEnd = addDays(currentDate, 2);
+  const rangeTask = await request('/api/parent/tasks', {
+    cookie: admin,
+    method: 'POST',
+    body: JSON.stringify({ studentIds: [secondId], title: '跨天作文', detail: '在期限内完成作文', categoryId, duration: 40, stars: 6, feedbackType: 'none', needsReview: false, scheduleType: 'range', startDate: rangeStart, endDate: rangeEnd })
+  });
+  assert.equal(rangeTask.response.status, 201);
+  assert.equal(rangeTask.body.count, 1, 'a date range creates one task record per student');
+  const rangeId = rangeTask.body.taskIds[0];
+  const rangeDetail = await request(`/api/parent/tasks/${rangeId}`, { cookie: admin });
+  assert.equal(rangeDetail.body.task.isDateRange, true);
+  assert.equal(rangeDetail.body.task.scheduleType, 'range');
+  assert.equal(rangeDetail.body.task.availableStartDate, rangeStart);
+  assert.equal(rangeDetail.body.task.availableEndDate, rangeEnd);
+  assert.equal(rangeDetail.body.task.date, rangeEnd, 'the range end is the due date');
+  for (const date of [rangeStart, addDays(rangeStart, 2), rangeEnd]) {
+    const day = await request(`/api/parent/tasks?studentId=${secondId}&date=${date}`, { cookie: admin });
+    assert.ok(day.body.tasks.some(task => task.id === rangeId), `range task must be visible on ${date}`);
+  }
+  const beforeRange = await request(`/api/parent/tasks?studentId=${secondId}&date=${addDays(rangeStart, -1)}`, { cookie: admin });
+  assert.ok(!beforeRange.body.tasks.some(task => task.id === rangeId));
+  const studentRangeDay = await request(`/api/student/dashboard?date=${addDays(rangeStart, 2)}`, { cookie: secondLogin.cookie });
+  assert.ok(studentRangeDay.body.tasks.some(task => task.id === rangeId), 'student can operate the same range task on any day in the range');
+
+  const editedRangeEnd = addDays(rangeEnd, 2);
+  const editedRange = await request(`/api/parent/tasks/${rangeId}`, {
+    cookie: admin,
+    method: 'PATCH',
+    body: JSON.stringify({ studentId: secondId, title: '跨天作文已调整', detail: '调整后的作文要求', categoryId, duration: 45, stars: 7, feedbackType: 'none', needsReview: false, scheduleType: 'range', startDate: rangeStart, endDate: editedRangeEnd })
+  });
+  assert.equal(editedRange.response.status, 200);
+  assert.equal((await request(`/api/parent/tasks/${rangeId}`, { cookie: admin })).body.task.availableEndDate, editedRangeEnd);
+  const deletedRange = await request(`/api/parent/tasks/${rangeId}`, { cookie: admin, method: 'DELETE' });
+  assert.equal(deletedRange.response.status, 200);
+  for (const date of [rangeStart, addDays(rangeStart, 2), editedRangeEnd]) {
+    const day = await request(`/api/parent/tasks?studentId=${secondId}&date=${date}`, { cookie: admin });
+    assert.ok(!day.body.tasks.some(task => task.id === rangeId), `deleted range task must disappear from ${date}`);
+  }
+  const completableRange = await request('/api/parent/tasks', {
+    cookie: admin,
+    method: 'POST',
+    body: JSON.stringify({ studentIds: [secondId], title: '跨天阅读报告', detail: '期限内任意一天提交', categoryId, duration: 30, stars: 5, feedbackType: 'none', needsReview: false, scheduleType: 'range', startDate: rangeStart, endDate: rangeEnd })
+  });
+  const completableRangeId = completableRange.body.taskIds[0];
+  const completedInRange = await request(`/api/student/tasks/${completableRangeId}/submit`, { cookie: secondLogin.cookie, method: 'POST', body: '{}' });
+  assert.equal(completedInRange.body.task.status, 'completed');
+  for (const date of [rangeStart, rangeEnd]) {
+    const day = await request(`/api/student/dashboard?date=${date}`, { cookie: secondLogin.cookie });
+    assert.equal(day.body.tasks.find(task => task.id === completableRangeId)?.status, 'completed', 'one completion updates the shared task across its whole date range');
+  }
+
   const largeImageBytes = Buffer.alloc(Math.floor(3.2 * 1024 * 1024), 0x61);
   largeImageBytes.set([0xff, 0xd8, 0xff], 0);
   const largeImageTask = await assign(secondId, '大图片资料测试', addDays(currentDate, 3), true, [{ name: '3MB学习图片.jpg', data: `data:image/jpeg;base64,${largeImageBytes.toString('base64')}` }]);
@@ -187,4 +246,12 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
 
   const genericFileTask = await assign(secondId, '通用文件资料测试', addDays(currentDate, 4), true, [{ name: '练习资料.bin', data: 'data:application/octet-stream;base64,AQID' }]);
   assert.equal(genericFileTask.response.status, 201, 'generic files under 6 MB are accepted as downloadable resources');
+
+  const database = new DatabaseSync(join(process.env.TEST_DATA_DIR, 'learning-planet.db'), { readOnly: true });
+  try {
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM task_resources WHERE data LIKE 'data:%;base64,%'").get().count, 0, 'resource binary data must not remain in SQLite');
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM tasks WHERE feedback_data LIKE 'data:%;base64,%'").get().count, 0, 'feedback binary data must not remain in SQLite');
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM users WHERE avatar LIKE 'data:image/%;base64,%'").get().count, 0, 'avatar binary data must not remain in SQLite');
+    assert.ok(database.prepare("SELECT COUNT(*) AS count FROM task_resources WHERE url LIKE '/uploads/%'").get().count >= 3);
+  } finally { database.close(); }
 });

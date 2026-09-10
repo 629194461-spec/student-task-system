@@ -53,7 +53,7 @@ function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, char
 function icon(name, className = '') { return `<i data-lucide="${escapeHtml(name)}"${className ? ` class="${escapeHtml(className)}"` : ''}></i>`; }
 function refreshIcons() { window.lucide?.createIcons({ attrs: { 'aria-hidden': 'true' } }); }
 function emptyState(iconName, title, description) { return `<div class="record-empty"><span class="empty-icon">${icon(iconName)}</span><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p></div>`; }
-function isImageAvatar(value) { return /^data:image\/(png|jpeg|webp);base64,/.test(value || ''); }
+function isImageAvatar(value) { return /^(?:data:image\/(?:png|jpeg|webp);base64,|\/uploads\/|https:\/\/)/.test(value || ''); }
 function isCategoryIcon(value) { return categoryIcons.some(([path]) => path === value); }
 function categoryIconMarkup(value) { return isCategoryIcon(value) ? `<img src="${escapeHtml(value)}" alt="" />` : escapeHtml(value || '✦'); }
 function avatarMarkup(value, fallback = '学') { return isImageAvatar(value) ? `<img src="${value}" alt="" />` : escapeHtml(value || fallback); }
@@ -116,6 +116,12 @@ function recurringLabel(task) {
   return days ? `每周${days}重复` : '每周重复';
 }
 function recurringBadge(task) { const label = recurringLabel(task); return label ? `<span class="recurring-badge">${icon('repeat-2')} ${escapeHtml(label)}</span>` : ''; }
+function rangeLabel(task) { return task?.isDateRange ? `${shortDate(task.availableStartDate)} 至 ${shortDate(task.availableEndDate)}内完成` : ''; }
+function rangeIsActive(task) { return !task?.isDateRange || (task.availableStartDate <= today() && task.availableEndDate >= today()); }
+function scheduleBadge(task) {
+  if (task?.isDateRange) return `<span class="date-range-badge">${icon('calendar-range')} ${escapeHtml(rangeLabel(task))}</span>`;
+  return recurringBadge(task);
+}
 function prependRequiredMark(element) {
   if (!element || element.querySelector(':scope > .required-mark')) return;
   const marker = document.createElement('span'); marker.className = 'required-mark'; marker.textContent = '*'; marker.setAttribute('aria-hidden', 'true');
@@ -169,8 +175,8 @@ function taskCard(task, compact = false) {
   const actionClass = ['in_progress', 'needs_more'].includes(task.status) ? 'continue-task' : task.status === 'not_started' ? 'start-task' : 'pending-task';
   const actionControl = task.status === 'completed'
     ? `<span class="task-complete-icon" aria-label="已完成" title="已完成">${icon('check')}</span>`
-    : `<button class="${actionClass}" ${task.status === 'pending_review' ? 'disabled' : `data-start-task="${task.id}"`}>${action}</button>`;
-  return `<article class="task-card task-detail-row" data-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="category-icon ${categoryClass[task.category] || 'cat-math'}">${categoryIconMarkup(task.icon)}</span><div class="task-main"><h3>${escapeHtml(task.title)}</h3>${recurringBadge(task)}<p class="task-description">${escapeHtml(task.detail || '暂无任务说明')}</p><div class="task-meta"><p>${icon('clock-3')} ${task.duration || 15} 分钟</p>${resourceBadge(task)}<span class="status ${klass}">${label}</span></div></div>${compact ? '' : `<div class="task-action"><span class="stars">⭐ ${task.stars} 颗星星</span>${actionControl}</div>`}</article>`;
+    : `<button class="${actionClass}" ${task.status === 'pending_review' || !rangeIsActive(task) ? 'disabled' : `data-start-task="${task.id}"`}>${!rangeIsActive(task) ? today() < task.availableStartDate ? '尚未开始' : '已截止' : action}</button>`;
+  return `<article class="task-card task-detail-row" data-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="category-icon ${categoryClass[task.category] || 'cat-math'}">${categoryIconMarkup(task.icon)}</span><div class="task-main"><h3>${escapeHtml(task.title)}</h3>${scheduleBadge(task)}<p class="task-description">${escapeHtml(task.detail || '暂无任务说明')}</p><div class="task-meta"><p>${icon('clock-3')} ${task.duration || 15} 分钟</p>${resourceBadge(task)}<span class="status ${klass}">${label}</span></div></div>${compact ? '' : `<div class="task-action"><span class="stars">⭐ ${task.stars} 颗星星</span>${actionControl}</div>`}</article>`;
 }
 function renderStudentWeek(data) {
   const labels = ['一', '二', '三', '四', '五', '六', '日'];
@@ -182,7 +188,7 @@ function renderStudentWeek(data) {
 }
 function studentTaskListRow(task) {
   const [klass, label] = statusMeta[task.status] || statusMeta.not_started;
-  return `<article class="student-task-row task-detail-row" data-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3>${recurringBadge(task)}<p class="task-description">${escapeHtml(task.detail || '暂无任务说明')}</p><p>${escapeHtml(shortDate(task.date))} · ${escapeHtml(task.category)} · ${task.duration || 0} 分钟</p>${resourceBadge(task)}</div><span class="stars">⭐ ${task.stars}</span><span class="status ${klass}">${escapeHtml(label)}</span></article>`;
+  return `<article class="student-task-row task-detail-row" data-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3>${scheduleBadge(task)}<p class="task-description">${escapeHtml(task.detail || '暂无任务说明')}</p><p>${escapeHtml(task.isDateRange ? rangeLabel(task) : shortDate(task.date))} · ${escapeHtml(task.category)} · ${task.duration || 0} 分钟</p>${resourceBadge(task)}</div><span class="stars">⭐ ${task.stars}</span><span class="status ${klass}">${escapeHtml(label)}</span></article>`;
 }
 function renderStudent(data) {
   state.student = data; state.tasks = data.tasks; state.studentDate = data.date;
@@ -222,7 +228,7 @@ async function loadStudentTaskList(filter = state.studentTaskFilter, { force = f
   if (state.studentTaskFilter === filter) { state.studentListTasks = data.tasks; renderStudentTaskList(); }
   return data.tasks;
 }
-function reviewRow(task) { return `<article class="review-row task-detail-row" data-parent-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="feedback-preview">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3><p>${escapeHtml(task.category)} · ${task.submittedAt ? formatDateTime(task.submittedAt) : '等待提交'} · ⭐ ${task.stars} 颗</p>${resourceBadge(task)}</div><button data-review="${task.id}">去审核</button></article>`; }
+function reviewRow(task) { return `<article class="review-row task-detail-row" data-parent-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="feedback-preview">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3>${scheduleBadge(task)}<p>${escapeHtml(task.category)} · ${task.submittedAt ? formatDateTime(task.submittedAt) : '等待提交'} · ⭐ ${task.stars} 颗</p>${resourceBadge(task)}</div><button data-review="${task.id}">去审核</button></article>`; }
 function renderParent(data) {
   state.parent = data; state.dashboardStudentId = data.selectedStudentId;
   const child = data.students.find(student => student.id === data.selectedStudentId) || data.students[0];
@@ -292,7 +298,7 @@ function renderParents() {
 async function loadParents() { if (state.user?.role !== 'admin') return; const data = await api('/api/admin/parents'); state.parents = data.parents; renderParents(); }
 function reviewListRow(task) {
   const feedbackLabel = task.feedbackType === 'none' ? '无需反馈' : task.hasFeedback ? '已提交反馈' : '未上传附件';
-  return `<article class="review-list-row task-detail-row" data-parent-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="student-avatar">${avatarMarkup(task.studentAvatar, task.studentName?.slice(0, 1))}</span><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3><p>${escapeHtml(task.category)} · ${feedbackLabel} · 提交于 ${formatDateTime(task.submittedAt)}</p>${resourceBadge(task)}</div><span class="stars">⭐ ${task.stars}</span><button class="primary-button" data-review="${task.id}">审核</button></article>`;
+  return `<article class="review-list-row task-detail-row" data-parent-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="student-avatar">${avatarMarkup(task.studentAvatar, task.studentName?.slice(0, 1))}</span><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div><h3>${escapeHtml(task.title)}</h3>${scheduleBadge(task)}<p>${escapeHtml(task.category)} · ${feedbackLabel} · 提交于 ${formatDateTime(task.submittedAt)}</p>${resourceBadge(task)}</div><span class="stars">⭐ ${task.stars}</span><button class="primary-button" data-review="${task.id}">审核</button></article>`;
 }
 function renderReviews() {
   $('#review-count').textContent = `${state.reviews.length} 项待审核`;
@@ -332,8 +338,8 @@ function renderTaskWeek() {
 function parentTaskRow(task) {
   const [, statusLabel] = statusMeta[task.status] || statusMeta.not_started;
   const canManage = !['pending_review', 'completed'].includes(task.status);
-  const actions = canManage ? `<div class="parent-task-actions"><button class="icon-button edit-task-button" data-edit-parent-task="${task.id}" aria-label="修改${escapeHtml(task.title)}" title="修改任务">${icon('pencil')}</button><button class="icon-button delete-task-button" data-delete-parent-task="${task.id}" aria-label="删除${escapeHtml(task.title)}" title="删除当天任务">${icon('trash')}</button></div>` : '<span class="task-actions-placeholder" aria-hidden="true"></span>';
-  return `<article class="parent-task-row task-detail-row" data-parent-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div class="parent-task-main"><div><h3>${escapeHtml(task.title)}</h3>${recurringBadge(task)}<span class="status ${statusMeta[task.status]?.[0] || 'waiting'}">${escapeHtml(statusLabel)}</span></div><p class="task-description">${escapeHtml(task.detail || '暂无任务说明')}</p><p>${escapeHtml(task.studentName || '')} · ${escapeHtml(task.category)} · ${task.duration || 0} 分钟 · ⭐ ${task.stars}</p>${resourceBadge(task)}</div>${actions}</article>`;
+  const actions = canManage ? `<div class="parent-task-actions"><button class="icon-button edit-task-button" data-edit-parent-task="${task.id}" aria-label="修改${escapeHtml(task.title)}" title="修改任务">${icon('pencil')}</button><button class="icon-button delete-task-button" data-delete-parent-task="${task.id}" aria-label="删除${escapeHtml(task.title)}" title="${task.isDateRange ? '删除范围任务' : '删除当天任务'}">${icon('trash')}</button></div>` : '<span class="task-actions-placeholder" aria-hidden="true"></span>';
+  return `<article class="parent-task-row task-detail-row" data-parent-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="category-icon" style="background:${escapeHtml(task.color)}1f">${categoryIconMarkup(task.icon)}</span><div class="parent-task-main"><div><h3>${escapeHtml(task.title)}</h3>${scheduleBadge(task)}<span class="status ${statusMeta[task.status]?.[0] || 'waiting'}">${escapeHtml(statusLabel)}</span></div><p class="task-description">${escapeHtml(task.detail || '暂无任务说明')}</p><p>${escapeHtml(task.studentName || '')} · ${escapeHtml(task.category)} · ${task.duration || 0} 分钟 · ⭐ ${task.stars}</p>${resourceBadge(task)}</div>${actions}</article>`;
 }
 function parentTaskCacheKey(date = state.taskDate) { return `${state.taskStudentId || 'all'}:${date}`; }
 function renderParentTasks(data) {
@@ -436,6 +442,7 @@ function setTemplateDateMode(mode) {
   state.templateDateMode = mode;
   $$('[data-template-date-mode]').forEach(button => button.classList.toggle('selected', button.dataset.templateDateMode === mode));
   $('#template-single-date-wrap').hidden = mode !== 'single'; $('#template-single-date').required = mode === 'single';
+  $('#template-range-fields').hidden = mode !== 'range'; $('#template-range-start-date').required = mode === 'range'; $('#template-range-end-date').required = mode === 'range';
   $('#template-repeat-fields').hidden = mode !== 'repeat'; $('#template-end-date').required = mode === 'repeat';
   if (mode === 'repeat') syncRepeatDateLimit('template');
   decorateRequiredFields($('#template-assign-form'));
@@ -454,6 +461,13 @@ function syncRepeatDateLimit(prefix) {
 }
 function schedulePayload(prefix, mode) {
   if (mode === 'single') { const date = $(`#${prefix}-single-date`).value; return { scheduleType: 'single', date, startDate: date, endDate: date }; }
+  if (mode === 'range') {
+    const startDate = $(`#${prefix}-range-start-date`).value;
+    const endDate = $(`#${prefix}-range-end-date`).value;
+    if (!startDate || !endDate) throw new Error('请填写持续日期的开始和结束日期');
+    if (endDate < startDate) throw new Error('结束日期不能早于开始日期');
+    return { scheduleType: 'range', startDate, endDate };
+  }
   const startDate = $(`#${prefix}-start-date`).value;
   const endDate = $(`#${prefix}-end-date`).value;
   const pattern = repeatPattern(prefix);
@@ -471,7 +485,7 @@ function showTemplateAssignmentStep(step) {
     const selected = state.templates.filter(template => state.selectedTemplateIds.includes(template.id));
     $('#template-assignment-selection').textContent = `已选择 ${selected.length} 个模板：${selected.map(template => template.title).join('、')}`;
     $('#template-assignment-students').innerHTML = activeStudents().map(student => `<label class="student-choice"><input type="checkbox" value="${student.id}" ${String(student.id) === String(state.taskStudentId) || activeStudents().length === 1 ? 'checked' : ''}/><span class="student-avatar">${avatarMarkup(student.avatar, student.display_name?.slice(0, 1))}</span><b>${escapeHtml(student.display_name)}</b></label>`).join('');
-    const date = state.taskDate || today(); $('#template-single-date').value = date; $('#template-start-date').value = ''; $('#template-end-date').value = date; setRepeatPattern('template', 'daily');
+    const date = state.taskDate || today(); $('#template-single-date').value = date; $('#template-range-start-date').value = date; $('#template-range-end-date').value = date; $('#template-start-date').value = ''; $('#template-end-date').value = date; setRepeatPattern('template', 'daily');
     $$('#template-weekday-picker input').forEach(input => { input.checked = Number(input.value) === (((parseDate(date).getUTCDay() + 6) % 7) + 1); });
     syncRepeatDateLimit('template'); setTemplateDateMode('single');
   }
@@ -488,6 +502,9 @@ function setAssignmentDateMode(mode) {
   $$('[data-assignment-date-mode]').forEach(button => button.classList.toggle('selected', button.dataset.assignmentDateMode === mode));
   $('#assignment-single-date-wrap').hidden = mode !== 'single';
   $('#assignment-single-date').required = mode === 'single';
+  $('#assignment-range-fields').hidden = mode !== 'range';
+  $('#assignment-range-start-date').required = mode === 'range';
+  $('#assignment-range-end-date').required = mode === 'range';
   $('#assignment-repeat-fields').hidden = mode !== 'repeat';
   $('#assignment-end-date').required = mode === 'repeat';
   if (mode === 'repeat') syncRepeatDateLimit('assignment');
@@ -519,6 +536,8 @@ function openAssignmentEditor(task = null) {
   $('#assignment-review').checked = task ? task.needsReview : true;
   const assignmentDate = task?.date || state.taskDate;
   $('#assignment-single-date').value = assignmentDate;
+  $('#assignment-range-start-date').value = task?.availableStartDate || assignmentDate;
+  $('#assignment-range-end-date').value = task?.availableEndDate || assignmentDate;
   $('#assignment-start-date').value = '';
   $('#assignment-end-date').value = assignmentDate;
   setRepeatPattern('assignment', 'daily');
@@ -529,10 +548,10 @@ function openAssignmentEditor(task = null) {
   $('#assignment-error').textContent = '';
   state.taskResources = (task?.resources || []).map(resource => ({ ...resource, existing: true })); state.removeTaskResource = false; $('#assignment-resource-file').value = ''; renderAssignmentResourcePreview(task);
   renderAssignmentCategoryIcon();
-  setAssignmentDateMode('single');
+  setAssignmentDateMode(task?.isDateRange ? 'range' : 'single');
   const seriesNote = $('#assignment-series-edit-note');
   if (task?.isRecurring) {
-    $('#assignment-single-date-wrap').hidden = true; $('#assignment-single-date').required = false; $('#assignment-repeat-fields').hidden = true; $('#assignment-end-date').required = false;
+    $('#assignment-single-date-wrap').hidden = true; $('#assignment-single-date').required = false; $('#assignment-range-fields').hidden = true; $('#assignment-range-start-date').required = false; $('#assignment-range-end-date').required = false; $('#assignment-repeat-fields').hidden = true; $('#assignment-end-date').required = false;
     seriesNote.hidden = false; seriesNote.innerHTML = `${icon('repeat-2')}<div><b>${escapeHtml(recurringLabel(task))}</b><span>${escapeHtml(task.seriesStartDate)} 至 ${escapeHtml(task.seriesEndDate)}；保存时默认修改整个系列。</span></div>`;
   } else seriesNote.hidden = true;
   setParentPage('assignment-editor');
@@ -624,8 +643,8 @@ function syncStudentTask(task) {
 function taskDetailStatus(task) { return (statusMeta[task.status] || statusMeta.not_started)[1]; }
 function feedbackTypeLabel(type) { return ({ photo_or_video: '图片或视频', photo: '仅图片', video: '仅视频', none: '无需反馈' })[type] || '图片或视频'; }
 function taskDetailFacts(task, includeStudent = false) {
-  const schedule = task.isRecurring ? `<p><b>重复规则</b>${escapeHtml(recurringLabel(task))} · ${escapeHtml(task.seriesStartDate)} 至 ${escapeHtml(task.seriesEndDate)}</p>` : '';
-  return `<div class="review-task-details task-detail-facts">${includeStudent ? `<p><b>学生</b>${escapeHtml(task.studentName || '未知学生')}</p>` : ''}<p><b>任务日期</b>${escapeHtml(task.date)}</p><p><b>当前状态</b>${escapeHtml(taskDetailStatus(task))}</p><p><b>预计时长</b>${task.duration || 0} 分钟</p><p><b>奖励星星</b>${task.stars || 0} 颗</p><p><b>反馈与审核</b>${feedbackTypeLabel(task.feedbackType)} · ${task.needsReview ? '需要家长审核' : '无需审核'}</p>${schedule}<p><b>任务说明</b>${escapeHtml(task.detail || '暂无任务说明')}</p></div>`;
+  const schedule = task.isRecurring ? `<p><b>重复规则</b>${escapeHtml(recurringLabel(task))} · ${escapeHtml(task.seriesStartDate)} 至 ${escapeHtml(task.seriesEndDate)}</p>` : task.isDateRange ? `<p><b>完成期限</b>${escapeHtml(task.availableStartDate)} 至 ${escapeHtml(task.availableEndDate)}，范围内任意一天均可完成</p>` : '';
+  return `<div class="review-task-details task-detail-facts">${includeStudent ? `<p><b>学生</b>${escapeHtml(task.studentName || '未知学生')}</p>` : ''}<p><b>${task.isDateRange ? '截止日期' : '任务日期'}</b>${escapeHtml(task.date)}</p><p><b>当前状态</b>${escapeHtml(taskDetailStatus(task))}</p><p><b>预计时长</b>${task.duration || 0} 分钟</p><p><b>奖励星星</b>${task.stars || 0} 颗</p><p><b>反馈与审核</b>${feedbackTypeLabel(task.feedbackType)} · ${task.needsReview ? '需要家长审核' : '无需审核'}</p>${schedule}<p><b>任务说明</b>${escapeHtml(task.detail || '暂无任务说明')}</p></div>`;
 }
 function taskFeedbackEvidence(task) {
   if (!task.hasFeedback) return '';
@@ -643,7 +662,7 @@ async function openStudentTaskDetail(taskId) {
   try {
     const task = (await api(`/api/student/tasks/${taskId}`, { silent: true })).task;
     syncStudentTask(task); state.activeTaskDetail = task;
-    const canWork = ['not_started', 'in_progress', 'needs_more'].includes(task.status);
+    const canWork = ['not_started', 'in_progress', 'needs_more'].includes(task.status) && rangeIsActive(task);
     const [, , action] = statusMeta[task.status] || statusMeta.not_started;
     const resultNote = task.status === 'completed' && task.encouragement ? `<p class="feedback-note"><b>家长鼓励</b>${escapeHtml(task.encouragement)}</p>` : '';
     $('#task-detail-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(task.icon)} ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2>${taskDetailFacts(task)}${taskResourceMarkup(task)}${resultNote}<div class="modal-actions"><button class="secondary-button dialog-cancel">关闭</button>${canWork ? `<button class="primary-button" data-start-task="${task.id}">${action}</button>` : ''}</div></div>`;
@@ -694,7 +713,7 @@ function openReview(task) {
   const feedback = task.feedbackData
     ? `<div class="review-evidence">${task.feedbackKind === 'video' ? '<span class="video-placeholder">▶</span>' : `<img src="${escapeHtml(task.feedbackData)}" alt="学生上传的任务反馈" />`}<span class="review-evidence-copy"><b>${escapeHtml(feedbackName)}</b><small>学生提交的学习反馈</small></span><span class="review-evidence-actions"><button type="button" class="resource-action-button" data-preview-feedback="${task.id}">${icon('eye')}<span>预览</span></button><a class="resource-action-button resource-download-button" href="${escapeHtml(task.feedbackData)}" download="${escapeHtml(feedbackName)}">${icon('download')}<span>下载</span></a></span></div>`
     : `<div class="no-feedback-note">${task.feedbackType === 'none' ? '此任务不需要提交图片或视频反馈。' : '当前没有可预览的附件，可以要求学生补充反馈。'}</div>`;
-  $('#review-modal-content').innerHTML = `<div class="modal-content review-modal"><p class="eyebrow">${escapeHtml(task.studentName)} · ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2><div class="review-task-details"><p><b>任务日期</b>${escapeHtml(task.date)}</p><p><b>预计时长</b>${task.duration || 0} 分钟</p><p><b>任务要求</b>${escapeHtml(task.detail)}</p><p><b>提交时间</b>${formatDateTime(task.submittedAt)}</p></div>${taskResourceMarkup(task)}${feedback}${task.feedbackNote ? `<p class="feedback-note"><b>学生说明</b>${escapeHtml(task.feedbackNote)}</p>` : ''}<div class="review-reward-form"><label>奖励星星<span class="number-with-unit"><input id="review-stars" type="number" min="1" step="1" value="${task.stars}" required /><b>颗</b></span></label><label>鼓励或补充说明<textarea id="review-message" maxlength="180" placeholder="写一句鼓励，或说明需要补充的内容">完成得很棒！</textarea></label></div><p class="login-error" id="review-error"></p><div class="review-actions"><button class="supplement" data-more="${task.id}">需要补充</button><button class="primary-button" data-approve="${task.id}">✓ 通过并奖励</button></div></div>`;
+  $('#review-modal-content').innerHTML = `<div class="modal-content review-modal"><p class="eyebrow">${escapeHtml(task.studentName)} · ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2><div class="review-task-details"><p><b>${task.isDateRange ? '完成期限' : '任务日期'}</b>${escapeHtml(task.isDateRange ? `${task.availableStartDate} 至 ${task.availableEndDate}` : task.date)}</p><p><b>预计时长</b>${task.duration || 0} 分钟</p><p><b>任务要求</b>${escapeHtml(task.detail)}</p><p><b>提交时间</b>${formatDateTime(task.submittedAt)}</p></div>${taskResourceMarkup(task)}${feedback}${task.feedbackNote ? `<p class="feedback-note"><b>学生说明</b>${escapeHtml(task.feedbackNote)}</p>` : ''}<div class="review-reward-form"><label>奖励星星<span class="number-with-unit"><input id="review-stars" type="number" min="1" step="1" value="${task.stars}" required /><b>颗</b></span></label><label>鼓励或补充说明<textarea id="review-message" maxlength="180" placeholder="写一句鼓励，或说明需要补充的内容">完成得很棒！</textarea></label></div><p class="login-error" id="review-error"></p><div class="review-actions"><button class="supplement" data-more="${task.id}">需要补充</button><button class="primary-button" data-approve="${task.id}">✓ 通过并奖励</button></div></div>`;
   $('#review-dialog').showModal();
   decorateRequiredFields($('#review-dialog'));
   refreshIcons();
@@ -841,8 +860,9 @@ document.addEventListener('click', async event => {
   const editTask = event.target.closest('[data-edit-parent-task]'); if (editTask) { try { const task = (await api(`/api/parent/tasks/${Number(editTask.dataset.editParentTask)}?includeData=0`)).task; openAssignmentEditor(task); } catch (err) { showToast(err.message); } return; }
   const deleteTask = event.target.closest('[data-delete-parent-task]'); if (deleteTask) {
     state.pendingTaskId = Number(deleteTask.dataset.deleteParentTask); state.pendingDeleteTask = state.parentTasks.find(task => task.id === state.pendingTaskId) || null;
-    const recurring = Boolean(state.pendingDeleteTask?.isRecurring); $('#task-delete-title').textContent = recurring ? '删除当前任务还是整个系列？' : '确认删除这项任务？';
-    $('#task-delete-description').textContent = recurring ? '删除整个系列时，已提交待审核和已完成的任务会保留。' : '只会删除当前日期下的这条任务，删除后无法恢复。';
+    const recurring = Boolean(state.pendingDeleteTask?.isRecurring); const ranged = Boolean(state.pendingDeleteTask?.isDateRange); $('#task-delete-title').textContent = recurring ? '删除当前任务还是整个系列？' : ranged ? '确认删除整个持续日期任务？' : '确认删除这项任务？';
+    $('#task-delete-description').textContent = recurring ? '删除整个系列时，已提交待审核和已完成的任务会保留。' : ranged ? `${rangeLabel(state.pendingDeleteTask)}，删除后这段时间内都不再显示该任务。` : '只会删除当前日期下的这条任务，删除后无法恢复。';
+    $('#confirm-task-delete').textContent = ranged ? '删除范围任务' : '删除当前任务';
     $('#confirm-task-series-delete').hidden = !recurring; $('#task-delete-dialog').showModal(); return;
   }
   if (event.target.id === 'confirm-task-delete' || event.target.id === 'confirm-task-series-delete') {
@@ -941,7 +961,7 @@ $('#assignment-form').addEventListener('submit', async event => {
   if (!studentIds.length) { error.textContent = '请至少选择一名学生'; return; }
   if (state.editingTaskId && studentIds.length !== 1) { error.textContent = '修改任务时只能选择一名学生'; return; }
   try {
-    const schedule = state.editingTaskId ? { scheduleType: 'single', date: $('#assignment-single-date').value, startDate: $('#assignment-single-date').value, endDate: $('#assignment-single-date').value } : schedulePayload('assignment', state.assignmentDateMode);
+    const schedule = state.editingTask?.isRecurring ? { scheduleType: 'single', date: $('#assignment-single-date').value, startDate: $('#assignment-single-date').value, endDate: $('#assignment-single-date').value } : schedulePayload('assignment', state.assignmentDateMode);
     const resourceChanges = state.removeTaskResource ? {
       resources: state.taskResources.filter(resource => !resource.existing).map(({ name, data }) => ({ name, data })),
       existingResourceIds: state.taskResources.filter(resource => resource.existing).map(resource => resource.id),
