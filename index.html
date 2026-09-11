@@ -4,8 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#2f80ed" />
+    <link rel="icon" type="image/png" href="assets/learning-planet-logo.png?v=20260911" />
     <title>学习星球</title>
-    <link rel="stylesheet" href="styles.css?v=20260910-media27" />
+    <link rel="stylesheet" href="styles.css?v=20260911-template-search2" />
   </head>
   <body>
     <section class="login-screen" id="login-screen" aria-label="学习星球登录">
@@ -128,7 +129,7 @@
         </section>
 
         <section class="page parent-page" id="templates">
-          <div class="page-heading"><div><p class="eyebrow">任务设置</p><h1>任务模板</h1></div><button class="primary-button" id="add-task-template"><i data-lucide="plus"></i>新增模板</button></div>
+          <div class="page-heading"><div><p class="eyebrow">任务设置</p><h1>任务模板</h1></div><div class="page-heading-actions"><label class="template-search"><i data-lucide="search" aria-hidden="true"></i><input id="template-search-input" type="search" placeholder="搜索任务标题或说明" aria-label="搜索任务标题或说明" autocomplete="off" /></label><button class="primary-button" id="add-task-template"><i data-lucide="plus"></i>新增模板</button></div></div>
           <div class="template-toolbar"><div class="template-library-tabs" id="template-library-tabs" role="tablist" aria-label="按任务分类查看模板"></div><span id="template-count"></span></div>
           <div class="template-groups" id="template-groups"></div>
         </section>
@@ -200,6 +201,6 @@
     <div class="global-loader" id="global-loader" role="status" aria-live="polite" hidden><div class="loader-orbit"><span class="loader-star">★</span><i></i><i></i><i></i></div><p>正在准备，请稍候…</p></div>
     <div class="toast" id="toast" role="status"></div>
     <script src="assets/vendor/lucide.min.js?v=1.42.0"></script>
-    <script src="app.js?v=20260910-media27"></script>
+    <script src="app.js?v=20260911-template-search1"></script>
   </body>
 </html>

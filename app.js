@@ -1,6 +1,6 @@
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const $$ = (selector, parent = document) => [...parent.querySelectorAll(selector)];
-const state = { user: null, role: 'student', captchaId: null, student: null, parent: null, parents: [], students: [], tasks: [], studentListTasks: [], studentTaskFilter: 'overdue', studentTaskListCache: new Map(), studentDate: '', studentDashboardCache: new Map(), studentLoadController: null, parentTaskCache: new Map(), parentTaskLoadController: null, pageLoads: new Map(), pageLoadedAt: new Map(), categories: [], templates: [], templateCategoryFilter: 'all', templatePickerCategoryId: null, editingTemplateId: null, templateResources: [], removeTemplateResource: false, selectedTemplateIds: [], templateDateMode: 'single', pendingTemplateId: null, reviews: [], statsPeriod: 'week', dashboardStudentId: null, activeStudentId: null, activeParentId: null, studentAvatar: '', parentAvatar: '', taskFeedbackData: '', taskFeedbackName: '', taskResources: [], removeTaskResource: false, editingTaskId: null, editingTask: null, pendingTaskUpdate: null, activeTaskDetail: null, pendingStudentStatus: null, pendingParentStatus: null, pendingUnlinkParentId: null, taskDate: '', taskStudentId: null, parentTasks: [], taskDates: [], assignmentDateMode: 'single', selectedCategoryIcon: '', pendingTaskId: null, pendingDeleteTask: null, pendingCategoryId: null };
+const state = { user: null, role: 'student', captchaId: null, student: null, parent: null, parents: [], students: [], tasks: [], studentListTasks: [], studentTaskFilter: 'overdue', studentTaskListCache: new Map(), studentDate: '', studentDashboardCache: new Map(), studentLoadController: null, parentTaskCache: new Map(), parentTaskLoadController: null, pageLoads: new Map(), pageLoadedAt: new Map(), categories: [], templates: [], templateCategoryFilter: 'all', templateSearch: '', templatePickerCategoryId: null, editingTemplateId: null, copyingTemplateId: null, templateResources: [], removeTemplateResource: false, selectedTemplateIds: [], templateDateMode: 'single', pendingTemplateId: null, reviews: [], statsPeriod: 'week', dashboardStudentId: null, activeStudentId: null, activeParentId: null, studentAvatar: '', parentAvatar: '', taskFeedbackData: '', taskFeedbackName: '', taskResources: [], removeTaskResource: false, editingTaskId: null, editingTask: null, pendingTaskUpdate: null, activeTaskDetail: null, pendingStudentStatus: null, pendingParentStatus: null, pendingUnlinkParentId: null, taskDate: '', taskStudentId: null, parentTasks: [], taskDates: [], assignmentDateMode: 'single', selectedCategoryIcon: '', pendingTaskId: null, pendingDeleteTask: null, pendingCategoryId: null };
 const statusMeta = { not_started: ['waiting', '等待开始', '开始任务'], in_progress: ['draft', '进行中', '继续任务'], pending_review: ['waiting', '待审核', '等待审核'], completed: ['done', '已完成', '已完成'], needs_more: ['draft', '待补充', '补充反馈'] };
 const categoryClass = { '语文小屋': 'cat-chinese', '数学乐园': 'cat-math', '阅读时光': 'cat-reading', '生活小能手': 'cat-life' };
 const categoryIcons = [
@@ -408,14 +408,16 @@ function templateVisibilityBadge(template) {
 function taskTemplateCard(template, selectable = false) {
   const resource = resourceBadge(template);
   if (selectable) return `<article class="template-picker-card"><label class="template-select-zone"><input type="checkbox" value="${template.id}" ${state.selectedTemplateIds.includes(template.id) ? 'checked' : ''}/><span class="category-icon" style="background:${escapeHtml(template.color)}1f">${categoryIconMarkup(template.icon)}</span><span class="template-picker-copy"><b>${escapeHtml(template.title)}</b><small>创建人：${escapeHtml(template.creatorName)} · ${template.duration} 分钟 · ⭐ ${template.stars}</small>${templateVisibilityBadge(template)}${resource}</span></label><button type="button" class="template-view-button" data-view-template="${template.id}">${icon('eye')} 查看详情</button></article>`;
-  const actions = `<div class="template-card-actions"><button class="icon-button" data-view-template="${template.id}" aria-label="查看${escapeHtml(template.title)}详情" title="查看详情">${icon('eye')}</button>${template.isOwner ? `<button class="icon-button" data-edit-template="${template.id}" aria-label="修改${escapeHtml(template.title)}" title="修改模板">${icon('pencil')}</button><button class="icon-button danger-text" data-delete-template="${template.id}" aria-label="删除${escapeHtml(template.title)}" title="删除模板">${icon('trash')}</button>` : ''}</div>`;
+  const actions = `<div class="template-card-actions"><button class="icon-button" data-view-template="${template.id}" aria-label="查看${escapeHtml(template.title)}详情" title="查看详情">${icon('eye')}</button>${template.isOwner ? `<button class="icon-button" data-copy-template="${template.id}" aria-label="复制${escapeHtml(template.title)}" title="复制模板">${icon('copy')}</button><button class="icon-button" data-edit-template="${template.id}" aria-label="修改${escapeHtml(template.title)}" title="修改模板">${icon('pencil')}</button><button class="icon-button danger-text" data-delete-template="${template.id}" aria-label="删除${escapeHtml(template.title)}" title="删除模板">${icon('trash')}</button>` : ''}</div>`;
   return `<article class="template-card"><span class="category-icon" style="background:${escapeHtml(template.color)}1f">${categoryIconMarkup(template.icon)}</span><div class="template-card-main"><div class="template-card-title"><h3>${escapeHtml(template.title)}</h3>${templateVisibilityBadge(template)}</div><p>${escapeHtml(template.detail)}</p><div class="template-card-meta"><span>${icon('clock-3')} ${template.duration} 分钟</span><span>⭐ ${template.stars} 颗</span><span>${template.needsReview ? '需要审核' : '无需审核'}</span><span>创建人：${escapeHtml(template.creatorName)}</span><span>${icon('refresh-cw')} 更新于 ${escapeHtml(formatUpdatedAt(template.updatedAt || template.createdAt))}</span>${resource}</div></div>${actions}</article>`;
 }
 function groupTemplates(templates) {
   return state.categories.map(category => ({ category, templates: templates.filter(template => template.categoryId === category.id) })).filter(group => group.templates.length);
 }
 function renderTemplateGroups() {
-  const filtered = state.templateCategoryFilter === 'all' ? state.templates : state.templates.filter(template => template.categoryId === Number(state.templateCategoryFilter));
+  const keyword = state.templateSearch.trim().toLowerCase();
+  const categoryFiltered = state.templateCategoryFilter === 'all' ? state.templates : state.templates.filter(template => template.categoryId === Number(state.templateCategoryFilter));
+  const filtered = keyword ? categoryFiltered.filter(template => [template.title, template.detail, template.creatorName, template.category].some(value => String(value || '').toLowerCase().includes(keyword))) : categoryFiltered;
   $('#template-count').textContent = `共 ${filtered.length} 个模板`;
   $('#template-library-tabs').innerHTML = `<button type="button" role="tab" data-template-category-filter="all" aria-selected="${state.templateCategoryFilter === 'all'}" class="${state.templateCategoryFilter === 'all' ? 'selected' : ''}">全部 <small>${state.templates.length}</small></button>${state.categories.map(category => { const count = state.templates.filter(template => template.categoryId === category.id).length; return `<button type="button" role="tab" data-template-category-filter="${category.id}" aria-selected="${String(category.id) === state.templateCategoryFilter}" class="${String(category.id) === state.templateCategoryFilter ? 'selected' : ''}">${categoryIconMarkup(category.icon)}<span>${escapeHtml(category.name)}</span><small>${count}</small></button>`; }).join('')}`;
   $('#template-groups').innerHTML = filtered.length ? `<div class="template-list template-library-list">${filtered.map(template => taskTemplateCard(template)).join('')}</div>` : emptyState('notebook-tabs', '暂无任务模板', '点击“新增模板”创建常用任务。');
@@ -433,10 +435,11 @@ function renderTemplateResourcePreview() {
   refreshIcons();
 }
 function openTemplateEditor(template = null) {
-  state.editingTemplateId = template?.id || null;
+  state.editingTemplateId = template?.copyMode ? null : (template?.id || null);
+  state.copyingTemplateId = template?.copyMode ? template.sourceTemplateId : null;
   $('#template-form').reset();
-  $('#template-editor-title').textContent = template ? '修改模板' : '新增模板';
-  $('#template-submit').textContent = template ? '保存修改' : '保存模板';
+  $('#template-editor-title').textContent = template?.copyMode ? '复制任务模板' : template ? '修改模板' : '新增模板';
+  $('#template-submit').textContent = template?.copyMode ? '保存模板' : template ? '保存修改' : '保存模板';
   $('#template-title').value = template?.title || '';
   $('#template-detail').value = template?.detail || '';
   $('#template-duration').value = template?.duration || 15;
@@ -854,6 +857,7 @@ document.addEventListener('click', async event => {
   if (event.target.id === 'open-assignment') { openAssignmentEditor(); return; }
   if (event.target.closest('#open-template-assignment')) { await openTemplateAssignment(); return; }
   if (event.target.closest('#add-task-template')) { openTemplateEditor(); return; }
+  const copyTemplate = event.target.closest('[data-copy-template]'); if (copyTemplate) { try { const sourceTemplate = (await api(`/api/parent/task-templates/${Number(copyTemplate.dataset.copyTemplate)}?includeData=0`)).template; if (!sourceTemplate?.isOwner) throw new Error('只能复制自己创建的任务模板'); openTemplateEditor({ ...sourceTemplate, id: null, copyMode: true, sourceTemplateId: sourceTemplate.id, title: `${sourceTemplate.title}（复制）`, isPublic: false }); } catch (err) { showToast(err.message); } return; }
   const templateCategoryFilter = event.target.closest('[data-template-category-filter]'); if (templateCategoryFilter) { state.templateCategoryFilter = templateCategoryFilter.dataset.templateCategoryFilter; renderTemplateGroups(); return; }
   if (event.target.closest('#cancel-template-editor, #cancel-template-form')) { await loadTaskTemplates(); setParentPage('templates'); return; }
   if (event.target.closest('#cancel-template-assignment')) { await prepareTaskManager(); setParentPage('assign'); return; }
@@ -995,6 +999,7 @@ $('#assignment-form').addEventListener('submit', async event => {
     await persistAssignment(payload, focusDate);
   } catch (err) { error.textContent = err.message; }
 });
+$('#template-search-input').addEventListener('input', event => { state.templateSearch = event.target.value; renderTemplateGroups(); });
 $('#task-student-filter').addEventListener('change', async event => { state.taskStudentId = event.target.value === 'all' ? 'all' : Number(event.target.value); await loadParentTasks(); });
 $('#assignment-students').addEventListener('change', event => { if (!state.editingTaskId || !event.target.matches('input') || !event.target.checked) return; $$('#assignment-students input').forEach(input => { if (input !== event.target) input.checked = false; }); });
 $('#assignment-start-date').addEventListener('change', () => syncRepeatDateLimit('assignment'));
@@ -1012,8 +1017,8 @@ $('#template-form').addEventListener('submit', async event => {
   } : {};
   const payload = { title: $('#template-title').value, detail: $('#template-detail').value, categoryId: Number($('#template-category').value), duration: Number($('#template-duration').value), stars: Number($('#template-stars').value), feedbackType: $('#template-feedback').value, needsReview: $('#template-review').checked, isPublic: $('#template-public').checked, ...resourceChanges };
   try {
-    await api(editing ? `/api/parent/task-templates/${editing}` : '/api/parent/task-templates', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
-    form.reset(); state.editingTemplateId = null; state.templateResources = []; state.removeTemplateResource = false; await loadTaskTemplates(); setParentPage('templates'); showToast(editing ? '任务模板已更新' : '任务模板已创建');
+    await api(editing ? `/api/parent/task-templates/${editing}` : '/api/parent/task-templates', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify({ ...payload, ...(state.copyingTemplateId ? { copyFromTemplateId: state.copyingTemplateId } : {}) }) });
+    form.reset(); state.editingTemplateId = null; state.copyingTemplateId = null; state.templateResources = []; state.removeTemplateResource = false; await loadTaskTemplates(); setParentPage('templates'); showToast(editing ? '任务模板已更新' : '任务模板已创建');
   } catch (err) { error.textContent = err.message; }
 });
 $('#template-assign-form').addEventListener('submit', async event => {

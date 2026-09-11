@@ -1021,16 +1021,22 @@ const server = createServer(async (req, res) => {
       const stars = Number(body.stars);
       const feedbackType = clean(body.feedbackType, 30) || 'photo_or_video';
       const resources = normalizeTaskResources(body);
+      const copyFromTemplateId = Number(body.copyFromTemplateId);
+      const copySource = Number.isInteger(copyFromTemplateId) && copyFromTemplateId > 0
+        ? db.prepare('SELECT * FROM task_templates WHERE id = ? AND creator_id = ?').get(copyFromTemplateId, user.id)
+        : null;
       if (title.length < 2) { bad(res, 400, '任务模板标题需为 2 至 80 个字符'); return; }
       if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
       if (!['photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
       if (!resources) { bad(res, 400, taskResourceValidationMessage(body)); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
-      const storedResources = await storeResources(resources, 'task-templates');
+      if (body.copyFromTemplateId && !copySource) { bad(res, 403, '只能复制自己创建的任务模板'); return; }
+      const copiedResourceIds = copySource ? linkedResources('template', copySource.id, copySource.resource_id).map(resource => resource.id) : [];
+      const storedResources = copiedResourceIds.length ? [] : await storeResources(resources, 'task-templates');
       db.exec('BEGIN');
       try {
-        const resourceIds = insertResources(storedResources, user.id);
+        const resourceIds = copiedResourceIds.length ? copiedResourceIds : insertResources(storedResources, user.id);
         const resourceId = resourceIds[0] || null;
         const createdAt = now();
         const result = db.prepare(`INSERT INTO task_templates (creator_id,title,category_id,detail,duration_minutes,stars,feedback_type,needs_review,resource_id,is_public,created_at,updated_at)
