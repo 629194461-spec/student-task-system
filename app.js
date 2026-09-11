@@ -186,6 +186,7 @@ function setLoginRole(role) {
   $$('.login-role').forEach(button => button.classList.toggle('active', button.dataset.loginRole === role));
   $('#login-title').textContent = role === 'student' ? '开始今天的学习吧' : '查看孩子的学习情况';
   $('#login-submit-label').textContent = role === 'student' ? '进入我的任务' : '进入家长首页';
+  $('#open-recovery').hidden = role !== 'parent';
   $('#login-error').textContent = '';
 }
 function taskCard(task, compact = false) {
@@ -842,11 +843,16 @@ $('#login-form').addEventListener('submit', async event => {
   finally { submit.disabled = false; submit.innerHTML = `<span id="login-submit-label">${state.role === 'student' ? '进入我的任务' : '进入家长首页'}</span> <b>→</b>`; }
 });
 document.addEventListener('click', async event => {
+  if (!event.target.closest('#account-menu') && !event.target.closest('#account-security-button')) $('#account-menu').hidden = true;
   if (!$('#student-action-menu').hidden && !event.target.closest('#student-action-menu') && !event.target.closest('[data-student-actions]')) closeStudentActionMenu();
   if (event.target.closest('#parent-mobile-menu-button')) { const open = !$('#app-shell').classList.contains('mobile-menu-open'); $('#app-shell').classList.toggle('mobile-menu-open', open); $('#parent-mobile-menu-button').setAttribute('aria-expanded', String(open)); $('#parent-sidebar-backdrop').hidden = !open; return; }
   if (event.target.closest('#parent-sidebar-backdrop')) { closeParentMobileMenu(); return; }
   const loginRole = event.target.closest('[data-login-role]'); if (loginRole) { setLoginRole(loginRole.dataset.loginRole); return; }
   if (event.target.closest('#refresh-captcha')) { await refreshCaptcha(); return; }
+  if (event.target.closest('#open-recovery')) { $('#recovery-form').reset(); $('#recovery-reset-fields').hidden = true; $('#recovery-error').textContent = ''; $('#recovery-dialog').showModal(); return; }
+  if (event.target.closest('#account-security-button')) { const menu = $('#account-menu'); menu.hidden = !menu.hidden; refreshIcons(); return; }
+  if (event.target.id === 'open-account-password') { $('#account-menu').hidden = true; $('#account-security-dialog').showModal(); return; }
+  if (event.target.id === 'open-account-email') { $('#account-menu').hidden = true; $('#recovery-email-form').reset(); $('#recovery-email-code-wrap').hidden = true; $('#recovery-email-message').textContent = ''; try { const data = await api('/api/auth/recovery-email', { silent: true }); $('#bound-email-status').textContent = data.email ? `当前已绑定：${data.email}` : '尚未绑定找回邮箱'; } catch (err) { $('#bound-email-status').textContent = err.message; } $('#email-settings-dialog').showModal(); return; }
   if (event.target.closest('#logout-button')) { $('#logout-dialog').showModal(); return; }
   if (event.target.id === 'confirm-logout') { try { await api('/api/auth/logout', { method: 'POST' }); } finally { closeDialogs(); closeStudentActionMenu(); state.user = null; $('#username').value = ''; $('#password').value = ''; setLoginRole('student'); displayLogin(); await refreshCaptcha(); } return; }
   const dialogClose = event.target.closest('.modal-close, .dialog-cancel'); if (dialogClose) { dialogClose.closest('dialog')?.close(); return; }
@@ -1041,6 +1047,31 @@ $('#category-form').addEventListener('submit', async event => {
 $('#password-form').addEventListener('submit', async event => {
   event.preventDefault(); const error = $('#password-error'); error.textContent = '';
   try { await api('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: $('#current-password').value, newPassword: $('#new-password').value }) }); state.user.mustChangePassword = false; $('#password-dialog').close(); event.currentTarget.reset(); showToast('密码已更新'); }
+  catch (err) { error.textContent = err.message; }
+});
+$('#account-password-form').addEventListener('submit', async event => {
+  event.preventDefault(); const error = $('#account-password-error'); error.textContent = '';
+  try { await api('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: $('#account-current-password').value, newPassword: $('#account-new-password').value }) }); event.currentTarget.reset(); showToast('密码已更新'); }
+  catch (err) { error.textContent = err.message; }
+});
+$('#recovery-email-form').addEventListener('submit', async event => {
+  event.preventDefault(); const message = $('#recovery-email-message'); message.textContent = '';
+  try { await api('/api/auth/recovery-email/request', { method: 'POST', body: JSON.stringify({ email: $('#recovery-email').value }) }); $('#recovery-email-code-wrap').hidden = false; message.textContent = '验证码已发送，请检查邮箱。'; }
+  catch (err) { message.textContent = err.message; }
+});
+$('#verify-recovery-email').addEventListener('click', async () => {
+  const message = $('#recovery-email-message'); message.textContent = '';
+  try { await api('/api/auth/recovery-email/verify', { method: 'POST', body: JSON.stringify({ email: $('#recovery-email').value, code: $('#recovery-email-code').value }) }); message.textContent = '找回邮箱已验证并保存。'; }
+  catch (err) { message.textContent = err.message; }
+});
+$('#recovery-form').addEventListener('submit', async event => {
+  event.preventDefault(); const error = $('#recovery-error'); error.textContent = '';
+  try { await api('/api/auth/recovery/request', { method: 'POST', body: JSON.stringify({ username: $('#recovery-username').value, email: $('#recovery-request-email').value }) }); $('#recovery-reset-fields').hidden = false; error.textContent = '如果账号和邮箱匹配，验证码已发送，请检查邮箱。'; }
+  catch (err) { error.textContent = err.message; }
+});
+$('#reset-recovered-password').addEventListener('click', async () => {
+  const error = $('#recovery-error'); error.textContent = '';
+  try { await api('/api/auth/recovery/reset', { method: 'POST', body: JSON.stringify({ username: $('#recovery-username').value, email: $('#recovery-request-email').value, code: $('#recovery-code').value, newPassword: $('#recovery-new-password').value }) }); $('#recovery-dialog').close(); showToast('密码已重置，请使用新密码登录'); }
   catch (err) { error.textContent = err.message; }
 });
 $('#student-avatar').addEventListener('change', async event => {

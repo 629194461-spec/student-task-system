@@ -2,7 +2,8 @@ import { createServer } from 'node:http';
 import { mkdirSync, existsSync, readFileSync, createReadStream, statSync } from 'node:fs';
 import { extname, join, normalize, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
+import { connect as tlsConnect } from 'node:tls';
 import { deleteStoredUrl, localUploadPath, signStoredUrl, storageDriver, storeDataUrl, validateStorageConfiguration } from './storage.mjs';
 
 const root = resolve('.');
@@ -21,6 +22,7 @@ const loginAttempts = new Map();
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const REMEMBER_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 const CAPTCHA_TTL_MS = 1000 * 60 * 5;
+const RECOVERY_CODE_TTL_MS = 1000 * 60 * 5;
 const WINDOW_MS = 1000 * 60 * 15;
 const MAX_LOGIN_ATTEMPTS = 8;
 const CATEGORY_ICONS = [
@@ -38,6 +40,26 @@ const CATEGORY_ICONS = [
 
 function now() { return new Date().toISOString(); }
 function unix() { return Date.now(); }
+const recoveryKey = createHash('sha256').update(process.env.RECOVERY_EMAIL_KEY || 'learning-planet-recovery-email-change-in-production').digest();
+function encryptRecoveryEmail(email) { const iv = randomBytes(12); const cipher = createCipheriv('aes-256-gcm', recoveryKey, iv); const data = Buffer.concat([cipher.update(email, 'utf8'), cipher.final()]); return `${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${data.toString('base64url')}`; }
+function decryptRecoveryEmail(value) { try { const [iv, tag, data] = String(value).split('.').map(part => Buffer.from(part, 'base64url')); const decipher = createDecipheriv('aes-256-gcm', recoveryKey, iv); decipher.setAuthTag(tag); return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8'); } catch { return ''; } }
+function hashToken(value) { return createHash('sha256').update(value).digest('hex'); }
+function maskedEmail(email) { const [name, domain] = String(email).split('@'); return name ? `${name.slice(0, 2)}***@${domain || ''}` : ''; }
+function smtpResponse(socket, timeout = 10000) { return new Promise((resolve, reject) => { let buffer = ''; const timer = setTimeout(() => { cleanup(); reject(new Error('SMTP 响应超时')); }, timeout); const onData = chunk => { buffer += chunk.toString(); const lines = buffer.split(/\r?\n/); buffer = lines.pop() || ''; const complete = lines.find(line => /^\d{3} /.test(line)); if (complete) { cleanup(); resolve({ code: Number(complete.slice(0, 3)), text: lines.join('\n') }); } }; const onError = error => { cleanup(); reject(error); }; const cleanup = () => { clearTimeout(timer); socket.off('data', onData); socket.off('error', onError); }; socket.on('data', onData); socket.on('error', onError); }); }
+async function smtpCommand(socket, command, expected) { if (command) socket.write(`${command}\r\n`); const response = await smtpResponse(socket); if (!expected.includes(response.code)) throw new Error(`SMTP 返回 ${response.code}`); return response; }
+async function sendSmtpEmail(to, code) {
+  const host = process.env.SMTP_HOST; const port = Number(process.env.SMTP_PORT || 465); const user = process.env.SMTP_USER; const pass = process.env.SMTP_PASS; const from = process.env.SMTP_FROM || user;
+  if (!host || !user || !pass || !from) throw new Error('SMTP 配置不完整');
+  const socket = tlsConnect({ host, port, servername: host, rejectUnauthorized: true });
+  try {
+    await smtpResponse(socket); await smtpCommand(socket, `EHLO learning-planet`, [250]);
+    await smtpCommand(socket, 'AUTH LOGIN', [334]); await smtpCommand(socket, Buffer.from(user).toString('base64'), [334]); await smtpCommand(socket, Buffer.from(pass).toString('base64'), [235]);
+    await smtpCommand(socket, `MAIL FROM:<${from}>`, [250]); await smtpCommand(socket, `RCPT TO:<${to}>`, [250, 251]); await smtpCommand(socket, 'DATA', [354]);
+    socket.write(`From: 学习星球 <${from}>\r\nTo: ${to}\r\nSubject: =?UTF-8?B?${Buffer.from('学习星球账号安全验证码').toString('base64')}?=\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n您的验证码是 ${code}，5 分钟内有效。\r\n.\r\n`);
+    await smtpResponse(socket); await smtpCommand(socket, 'QUIT', [221]);
+  } finally { socket.end(); }
+}
+async function sendRecoveryCode(email, code) { const webhook = process.env.EMAIL_WEBHOOK_URL; if (webhook) { const response = await fetch(webhook, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: email, subject: '学习星球账号安全验证码', text: `您的验证码是 ${code}，5 分钟内有效。` }) }); if (!response.ok) throw new Error('验证码发送失败'); return; } if (process.env.SMTP_HOST) { await sendSmtpEmail(email, code); return; } if (isProduction) throw new Error('未配置邮箱发送服务'); console.info(`[recovery-code] ${email}: ${code}`); }
 function businessDate() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: process.env.APP_TIMEZONE || 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 }
@@ -290,6 +312,25 @@ function migrate() {
     );
     CREATE TABLE IF NOT EXISTS system_settings (
       key TEXT PRIMARY KEY, value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS recovery_emails (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      email_cipher TEXT NOT NULL, email_hash TEXT NOT NULL UNIQUE,
+      verified_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS recovery_codes (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      purpose TEXT NOT NULL, code_hash TEXT NOT NULL, expires_at TEXT NOT NULL,
+      used_at TEXT, request_ip TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, used_at TEXT,
+      request_ip TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS security_logs (
+      id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      action TEXT NOT NULL, request_ip TEXT NOT NULL, created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS parent_students (
       parent_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -602,6 +643,58 @@ const server = createServer(async (req, res) => {
     purgeEphemeralState();
     if (!url.pathname.startsWith('/api/')) { serveStatic(req, res, url.pathname); return; }
     if (req.method === 'GET' && url.pathname === '/api/auth/captcha') { json(res, 200, createCaptcha()); return; }
+    if (req.method === 'GET' && url.pathname === '/api/auth/recovery-email') {
+      const user = requireUser(req, res); if (!user) return;
+      const record = db.prepare('SELECT email_cipher, verified_at FROM recovery_emails WHERE user_id = ?').get(user.id);
+      json(res, 200, { email: record ? maskedEmail(decryptRecoveryEmail(record.email_cipher)) : '', verified: Boolean(record?.verified_at) }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/recovery-email/request') {
+      const user = requireUser(req, res); if (!user) return;
+      if (!['parent', 'admin'].includes(user.role)) { bad(res, 403, '学生账号不能绑定找回邮箱'); return; }
+      const body = await readBody(req); const email = clean(body.email, 160).toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { bad(res, 400, '请输入有效邮箱地址'); return; }
+      if (db.prepare('SELECT 1 FROM recovery_emails WHERE email_hash = ? AND user_id <> ?').get(hashToken(email), user.id)) { bad(res, 409, '该邮箱已绑定其他账号'); return; }
+      const code = String(randomInt(100000, 1000000));
+      db.prepare("DELETE FROM recovery_codes WHERE user_id = ? AND purpose = 'bind_email'").run(user.id);
+      db.prepare('INSERT INTO recovery_codes (user_id,purpose,code_hash,expires_at,request_ip,created_at) VALUES (?, ?, ?, ?, ?, ?)').run(user.id, 'bind_email', hashToken(code), new Date(unix() + RECOVERY_CODE_TTL_MS).toISOString(), ip, now());
+      try { await sendRecoveryCode(email, code); } catch { bad(res, 503, '验证码发送失败，请稍后重试'); return; }
+      json(res, 200, { ok: true, maskedEmail: maskedEmail(email) }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/recovery-email/verify') {
+      const user = requireUser(req, res); if (!user) return;
+      const body = await readBody(req); const email = clean(body.email, 160).toLowerCase(); const code = clean(body.code, 12);
+      const record = db.prepare("SELECT * FROM recovery_codes WHERE user_id = ? AND purpose = 'bind_email' AND used_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1").get(user.id, now());
+      if (!record || record.code_hash !== hashToken(code)) { bad(res, 400, '验证码不正确或已过期'); return; }
+      db.prepare('UPDATE recovery_codes SET used_at = ? WHERE id = ?').run(now(), record.id);
+      const timestamp = now();
+      db.prepare(`INSERT INTO recovery_emails (user_id,email_cipher,email_hash,verified_at,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET email_cipher = excluded.email_cipher, email_hash = excluded.email_hash, verified_at = excluded.verified_at, updated_at = excluded.updated_at`).run(user.id, encryptRecoveryEmail(email), hashToken(email), timestamp, timestamp, timestamp);
+      db.prepare('INSERT INTO security_logs (user_id,action,request_ip,created_at) VALUES (?, ?, ?, ?)').run(user.id, 'bind_recovery_email', ip, timestamp);
+      json(res, 200, { ok: true, email: maskedEmail(email) }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/recovery/request') {
+      const body = await readBody(req); const username = clean(body.username, 48); const email = clean(body.email, 160).toLowerCase();
+      const user = db.prepare("SELECT users.id, users.role FROM users JOIN recovery_emails ON recovery_emails.user_id = users.id WHERE users.username = ? AND users.active = 1 AND users.role IN ('parent','admin') AND recovery_emails.email_hash = ?").get(username, hashToken(email));
+      if (user) {
+        const code = String(randomInt(100000, 1000000));
+        db.prepare("DELETE FROM recovery_codes WHERE user_id = ? AND purpose = 'reset_password'").run(user.id);
+        db.prepare('INSERT INTO recovery_codes (user_id,purpose,code_hash,expires_at,request_ip,created_at) VALUES (?, ?, ?, ?, ?, ?)').run(user.id, 'reset_password', hashToken(code), new Date(unix() + RECOVERY_CODE_TTL_MS).toISOString(), ip, now());
+        try { await sendRecoveryCode(email, code); } catch { /* Keep the response generic. */ }
+      }
+      json(res, 200, { ok: true, message: '如果账号和邮箱匹配，验证码已发送，请检查邮箱。' }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/recovery/reset') {
+      const body = await readBody(req); const username = clean(body.username, 48); const email = clean(body.email, 160).toLowerCase(); const code = clean(body.code, 12); const newPassword = typeof body.newPassword === 'string' ? body.newPassword : '';
+      if (newPassword.length < 10 || !/[A-Za-z]/.test(newPassword) || !/\d/.test(newPassword)) { bad(res, 400, '新密码至少 10 位，并包含字母和数字'); return; }
+      const user = db.prepare("SELECT users.id FROM users JOIN recovery_emails ON recovery_emails.user_id = users.id WHERE users.username = ? AND users.active = 1 AND users.role IN ('parent','admin') AND recovery_emails.email_hash = ?").get(username, hashToken(email));
+      const record = user && db.prepare("SELECT * FROM recovery_codes WHERE user_id = ? AND purpose = 'reset_password' AND used_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1").get(user.id, now());
+      if (!user || !record || record.code_hash !== hashToken(code)) { bad(res, 400, '验证码不正确或已过期'); return; }
+      db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hashPassword(newPassword), user.id);
+      db.prepare('UPDATE recovery_codes SET used_at = ? WHERE id = ?').run(now(), record.id);
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+      db.prepare('INSERT INTO security_logs (user_id,action,request_ip,created_at) VALUES (?, ?, ?, ?)').run(user.id, 'reset_password', ip, now());
+      json(res, 200, { ok: true }); return;
+    }
     if (req.method === 'POST' && url.pathname === '/api/auth/login') {
       const limit = rateLimit(ip);
       if (!limit.allowed) { bad(res, 429, '尝试次数过多，请 15 分钟后再试'); return; }
@@ -648,7 +741,7 @@ const server = createServer(async (req, res) => {
       const date = clean(url.searchParams.get('date') || businessDate(), 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { bad(res, 400, '日期格式不正确'); return; }
       const week = weekRange(date);
-      const weekRows = db.prepare(`SELECT tasks.*, ${taskResourceSummarySql} FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0 ORDER BY task_date, CASE status WHEN 'not_started' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'needs_more' THEN 3 WHEN 'pending_review' THEN 4 ELSE 5 END, id`).all(user.id, week.end, week.start, week.start, week.end).map(taskJson);
+      const weekRows = db.prepare(`SELECT tasks.*, ${taskResourceSummarySql} FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0 ORDER BY task_date, created_at DESC, id DESC`).all(user.id, week.end, week.start, week.start, week.end).map(taskJson);
       const weekTasks = Object.fromEntries(dateRange(week.start, week.end).map(day => [day, weekRows.filter(task => taskVisibleOn(task, day))]));
       const tasks = weekTasks[date] || [];
       const taskDates = Object.entries(weekTasks).filter(([, dayTasks]) => dayTasks.length).map(([day]) => day);
@@ -671,7 +764,7 @@ const server = createServer(async (req, res) => {
       };
       const selected = filters[filter];
       if (!selected) { bad(res, 400, '任务筛选条件不正确'); return; }
-      const order = filter === 'completed' ? 'task_date DESC, id DESC' : 'task_date ASC, id ASC';
+      const order = 'created_at DESC, id DESC';
       const tasks = db.prepare(`SELECT tasks.*, ${taskResourceSummarySql} FROM tasks WHERE student_id = ? AND is_demo = 0 AND ${selected.sql} ORDER BY ${order}`).all(user.id, ...selected.args).map(taskJson);
       json(res, 200, { filter, tasks });
       return;
@@ -896,10 +989,16 @@ const server = createServer(async (req, res) => {
       const range = statsRange(period, clean(url.searchParams.get('startDate'), 10), clean(url.searchParams.get('endDate'), 10));
       if (!range) { bad(res, 400, '请选择有效的统计日期范围'); return; }
       const students = studentListFor(user);
-      const taskStats = db.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed, SUM(CASE WHEN status = 'completed' AND submitted_at IS NOT NULL AND substr(submitted_at, 1, 10) <= task_date THEN 1 ELSE 0 END) AS on_time FROM tasks WHERE student_id = ? AND task_date BETWEEN ? AND ? AND is_demo = 0`);
+      const taskStats = db.prepare(`SELECT COUNT(*) AS total,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+        SUM(CASE WHEN status = 'completed' AND submitted_at IS NOT NULL AND substr(submitted_at, 1, 10) <= CASE WHEN schedule_type = 'range' THEN available_end_date ELSE task_date END THEN 1 ELSE 0 END) AS on_time
+        FROM tasks
+        WHERE student_id = ? AND is_demo = 0
+          AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?)
+            OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?))`);
       const rewardStats = db.prepare('SELECT COALESCE(SUM(stars), 0) AS stars FROM rewards WHERE student_id = ? AND substr(created_at, 1, 10) BETWEEN ? AND ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))');
       const rows = students.map(student => {
-        const tasks = taskStats.get(student.id, range.start, range.end);
+        const tasks = taskStats.get(student.id, range.end, range.start, range.start, range.end);
         const stars = Number(rewardStats.get(student.id, range.start, range.end).stars || 0);
         const total = Number(tasks.total || 0); const completed = Number(tasks.completed || 0); const onTime = Number(tasks.on_time || 0);
         return { studentId: student.id, studentName: student.display_name, studentAvatar: signStoredUrl(student.avatar), active: Boolean(student.active), stars, total, completed, onTime, completionRate: total ? Math.round(completed / total * 100) : null, onTimeRate: total ? Math.round(onTime / total * 100) : null };
@@ -997,7 +1096,7 @@ const server = createServer(async (req, res) => {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
       const templates = db.prepare(`${templateSelectSql}
         WHERE task_templates.creator_id = ? OR task_templates.is_public = 1
-        ORDER BY task_categories.name, task_templates.updated_at DESC, task_templates.id DESC`).all(user.id);
+        ORDER BY task_templates.created_at DESC, task_templates.id DESC`).all(user.id);
       json(res, 200, { templates: templates.map(template => taskTemplateJson({ ...template, is_owner: template.creator_id === user.id })) });
       return;
     }
@@ -1032,11 +1131,14 @@ const server = createServer(async (req, res) => {
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
       if (body.copyFromTemplateId && !copySource) { bad(res, 403, '只能复制自己创建的任务模板'); return; }
-      const copiedResourceIds = copySource ? linkedResources('template', copySource.id, copySource.resource_id).map(resource => resource.id) : [];
-      const storedResources = copiedResourceIds.length ? [] : await storeResources(resources, 'task-templates');
+      const sourceResourceIds = copySource ? linkedResources('template', copySource.id, copySource.resource_id).map(resource => resource.id) : [];
+      const copyReplacesResources = Boolean(copySource && (body.removeResource === true || Array.isArray(body.existingResourceIds) || Array.isArray(body.resources) || body.resourceData));
+      const existingCopyResourceIds = copyReplacesResources ? normalizeExistingResourceIds(body) : sourceResourceIds;
+      if (!existingCopyResourceIds || existingCopyResourceIds.some(id => !sourceResourceIds.includes(id)) || existingCopyResourceIds.length + resources.length > 5) { bad(res, 400, '任务资料选择无效或超过 5 个文件'); return; }
+      const storedResources = copySource && !copyReplacesResources ? [] : await storeResources(resources, 'task-templates');
       db.exec('BEGIN');
       try {
-        const resourceIds = copiedResourceIds.length ? copiedResourceIds : insertResources(storedResources, user.id);
+        const resourceIds = copySource ? [...existingCopyResourceIds, ...insertResources(storedResources, user.id)] : insertResources(storedResources, user.id);
         const resourceId = resourceIds[0] || null;
         const createdAt = now();
         const result = db.prepare(`INSERT INTO task_templates (creator_id,title,category_id,detail,duration_minutes,stars,feedback_type,needs_review,resource_id,is_public,created_at,updated_at)
@@ -1190,8 +1292,8 @@ const server = createServer(async (req, res) => {
       const week = weekRange(date);
       const baseSql = `SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE ((tasks.schedule_type = 'range' AND tasks.available_start_date <= ? AND tasks.available_end_date >= ?) OR (tasks.schedule_type <> 'range' AND tasks.task_date BETWEEN ? AND ?)) AND tasks.is_demo = 0`;
       const weekRows = studentId
-        ? db.prepare(`${baseSql} AND tasks.student_id = ? ORDER BY tasks.task_date, tasks.id DESC`).all(week.end, week.start, week.start, week.end, studentId)
-        : db.prepare(`${baseSql} AND tasks.student_id IN (${allowedIds.map(() => '?').join(',')}) ORDER BY tasks.task_date, users.display_name, tasks.id DESC`).all(week.end, week.start, week.start, week.end, ...allowedIds);
+        ? db.prepare(`${baseSql} AND tasks.student_id = ? ORDER BY tasks.task_date, tasks.created_at DESC, tasks.id DESC`).all(week.end, week.start, week.start, week.end, studentId)
+        : db.prepare(`${baseSql} AND tasks.student_id IN (${allowedIds.map(() => '?').join(',')}) ORDER BY tasks.task_date, tasks.created_at DESC, users.display_name, tasks.id DESC`).all(week.end, week.start, week.start, week.end, ...allowedIds);
       const serialized = weekRows.map(taskJson);
       const weekTasks = Object.fromEntries(dateRange(week.start, week.end).map(day => [day, serialized.filter(task => taskVisibleOn(task, day))]));
       const taskDates = Object.entries(weekTasks).filter(([, dayTasks]) => dayTasks.length).map(([day]) => day);
