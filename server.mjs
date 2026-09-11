@@ -250,9 +250,13 @@ function cookieValue(req, name) {
   const pair = cookies.find(value => value.startsWith(`${name}=`));
   return pair ? decodeURIComponent(pair.slice(name.length + 1)) : null;
 }
-function secureCookie(name, value, maxAge = 0) {
+function requestIsSecure(req) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return forwardedProto === 'https' || Boolean(req.socket.encrypted);
+}
+function secureCookie(req, name, value, maxAge = 0) {
   const settings = [`${name}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Strict'];
-  if (isProduction) settings.push('Secure');
+  if (isProduction && requestIsSecure(req)) settings.push('Secure');
   if (maxAge) settings.push(`Max-Age=${Math.floor(maxAge / 1000)}`);
   return settings.join('; ');
 }
@@ -714,13 +718,13 @@ const server = createServer(async (req, res) => {
       clearRateLimit(ip);
       const sessionTtl = body.rememberMe === true ? REMEMBER_SESSION_TTL_MS : SESSION_TTL_MS;
       const token = createSession(user.id, sessionTtl);
-      json(res, 200, { user: publicUser(user) }, { 'set-cookie': secureCookie('lp_session', token, sessionTtl) });
+      json(res, 200, { user: publicUser(user) }, { 'set-cookie': secureCookie(req, 'lp_session', token, sessionTtl) });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
       const token = cookieValue(req, 'lp_session');
       if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(createHash('sha256').update(token).digest('hex'));
-      json(res, 204, {}, { 'set-cookie': secureCookie('lp_session', '', -1) });
+      json(res, 204, {}, { 'set-cookie': secureCookie(req, 'lp_session', '', -1) });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/auth/change-password') {
