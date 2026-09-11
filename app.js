@@ -64,6 +64,17 @@ function enhancePasswordInputs() {
     wrapper.appendChild(button);
   });
 }
+function resetPasswordVisibility(root = document) {
+  $$("input[data-password-toggle-ready]", root).forEach(input => {
+    input.type = 'password';
+    const button = input.closest('.password-input-wrap')?.querySelector('[data-password-toggle]');
+    if (button) {
+      button.innerHTML = icon('eye');
+      button.setAttribute('aria-label', '显示密码');
+      button.title = '显示密码';
+    }
+  });
+}
 function beginLoading(delay = 180) {
   activeRequests += 1;
   if (activeRequests !== 1) return;
@@ -866,6 +877,7 @@ function openStudentActions(student, anchor) {
 ['#student-grade', '#template-feedback', '#assignment-feedback'].forEach(selector => { const field = $(selector); if (field) field.required = true; });
 decorateRequiredFields();
 enhancePasswordInputs();
+$$('dialog').forEach(dialog => dialog.addEventListener('close', () => resetPasswordVisibility(dialog)));
 document.addEventListener('dragover', event => {
   const zone = dropZoneFromEvent(event); if (!zone || !dropZoneInput(zone)) return;
   event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; zone.classList.add('is-dragging');
