@@ -50,6 +50,7 @@ function dateSpanDays(start, end) { return Math.floor((parseDate(end) - parseDat
 function formatDateTime(value) { if (!value) return '暂无时间'; return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value)); }
 function formatUpdatedAt(value) { return value ? formatDateTime(value) : '暂无时间'; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]); }
+function multilineText(value, fallback = '') { return escapeHtml(value || fallback).replace(/\r?\n/g, '<br>'); }
 function icon(name, className = '') { return `<i data-lucide="${escapeHtml(name)}"${className ? ` class="${escapeHtml(className)}"` : ''}></i>`; }
 function refreshIcons() { window.lucide?.createIcons({ attrs: { 'aria-hidden': 'true' } }); }
 function emptyState(iconName, title, description) { return `<div class="record-empty"><span class="empty-icon">${icon(iconName)}</span><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p></div>`; }
@@ -99,6 +100,23 @@ async function prepareTaskResource(file) {
   if (['image/svg+xml', 'text/html', 'application/xhtml+xml', 'application/javascript', 'text/javascript'].includes(mime)) throw new Error('出于安全考虑，不支持网页或脚本类文件');
   const source = file.type ? file : file.slice(0, file.size, mime);
   return await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('任务资料读取失败')); reader.readAsDataURL(source); });
+}
+function taskResourceKind(file) {
+  const mime = (file.type || '').toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  const extension = file.name.toLowerCase().split('.').pop();
+  return ['mp3', 'm4a', 'aac', 'wav', 'ogg', 'oga', 'weba', 'flac'].includes(extension) ? 'audio' : 'file';
+}
+function resourceKindOf(resource) {
+  const mime = (resource?.mime || '').toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  const extension = (resource?.name || '').toLowerCase().split('.').pop();
+  if (['mp3', 'm4a', 'aac', 'wav', 'ogg', 'oga', 'weba', 'flac'].includes(extension)) return 'audio';
+  return resource?.kind || 'file';
 }
 function showToast(message) { const toast = $('#toast'); toast.textContent = message; toast.classList.add('show'); clearTimeout(showToast.timer); showToast.timer = setTimeout(() => toast.classList.remove('show'), 3000); }
 function resourceSummary(item) {
@@ -383,12 +401,15 @@ function renderCategories() {
 }
 async function loadCategories() { const data = await api('/api/parent/categories'); state.categories = data.categories; renderCategories(); }
 function renderAssignmentCategoryIcon() { const category = state.categories.find(item => item.id === Number($('#assignment-category').value)) || state.categories[0]; $('#assignment-category-icon').innerHTML = category ? categoryIconMarkup(category.icon) : ''; }
-function templateVisibility(template) { return template.isPublic ? '开放模板' : '仅自己可见'; }
+function templateVisibility(template) { return template.isPublic ? '公开模板' : '私有模板'; }
+function templateVisibilityBadge(template) {
+  return `<span class="template-visibility ${template.isPublic ? 'public' : 'private'}">${template.isPublic ? icon('globe-2') : icon('lock-keyhole')} ${templateVisibility(template)}</span>`;
+}
 function taskTemplateCard(template, selectable = false) {
   const resource = resourceBadge(template);
-  if (selectable) return `<article class="template-picker-card"><label class="template-select-zone"><input type="checkbox" value="${template.id}" ${state.selectedTemplateIds.includes(template.id) ? 'checked' : ''}/><span class="category-icon" style="background:${escapeHtml(template.color)}1f">${categoryIconMarkup(template.icon)}</span><span class="template-picker-copy"><b>${escapeHtml(template.title)}</b><small>${escapeHtml(template.creatorName)} · ${template.duration} 分钟 · ⭐ ${template.stars}</small><small>${template.isPublic ? '开放模板' : '我的私有模板'}</small>${resource}</span></label><button type="button" class="template-view-button" data-view-template="${template.id}">${icon('eye')} 查看详情</button></article>`;
+  if (selectable) return `<article class="template-picker-card"><label class="template-select-zone"><input type="checkbox" value="${template.id}" ${state.selectedTemplateIds.includes(template.id) ? 'checked' : ''}/><span class="category-icon" style="background:${escapeHtml(template.color)}1f">${categoryIconMarkup(template.icon)}</span><span class="template-picker-copy"><b>${escapeHtml(template.title)}</b><small>创建人：${escapeHtml(template.creatorName)} · ${template.duration} 分钟 · ⭐ ${template.stars}</small>${templateVisibilityBadge(template)}${resource}</span></label><button type="button" class="template-view-button" data-view-template="${template.id}">${icon('eye')} 查看详情</button></article>`;
   const actions = `<div class="template-card-actions"><button class="icon-button" data-view-template="${template.id}" aria-label="查看${escapeHtml(template.title)}详情" title="查看详情">${icon('eye')}</button>${template.isOwner ? `<button class="icon-button" data-edit-template="${template.id}" aria-label="修改${escapeHtml(template.title)}" title="修改模板">${icon('pencil')}</button><button class="icon-button danger-text" data-delete-template="${template.id}" aria-label="删除${escapeHtml(template.title)}" title="删除模板">${icon('trash')}</button>` : ''}</div>`;
-  return `<article class="template-card"><span class="category-icon" style="background:${escapeHtml(template.color)}1f">${categoryIconMarkup(template.icon)}</span><div class="template-card-main"><div class="template-card-title"><h3>${escapeHtml(template.title)}</h3><span class="template-visibility ${template.isPublic ? 'public' : 'private'}">${template.isPublic ? icon('globe-2') : icon('lock-keyhole')} ${templateVisibility(template)}</span></div><p>${escapeHtml(template.detail)}</p><div class="template-card-meta"><span>${icon('clock-3')} ${template.duration} 分钟</span><span>⭐ ${template.stars} 颗</span><span>${template.needsReview ? '需要审核' : '无需审核'}</span><span>创建人：${escapeHtml(template.creatorName)}</span><span>${icon('refresh-cw')} 更新于 ${escapeHtml(formatUpdatedAt(template.updatedAt || template.createdAt))}</span>${resource}</div></div>${actions}</article>`;
+  return `<article class="template-card"><span class="category-icon" style="background:${escapeHtml(template.color)}1f">${categoryIconMarkup(template.icon)}</span><div class="template-card-main"><div class="template-card-title"><h3>${escapeHtml(template.title)}</h3>${templateVisibilityBadge(template)}</div><p>${escapeHtml(template.detail)}</p><div class="template-card-meta"><span>${icon('clock-3')} ${template.duration} 分钟</span><span>⭐ ${template.stars} 颗</span><span>${template.needsReview ? '需要审核' : '无需审核'}</span><span>创建人：${escapeHtml(template.creatorName)}</span><span>${icon('refresh-cw')} 更新于 ${escapeHtml(formatUpdatedAt(template.updatedAt || template.createdAt))}</span>${resource}</div></div>${actions}</article>`;
 }
 function groupTemplates(templates) {
   return state.categories.map(category => ({ category, templates: templates.filter(template => template.categoryId === category.id) })).filter(group => group.templates.length);
@@ -403,7 +424,7 @@ function renderTemplateGroups() {
 async function loadTaskTemplates() { const data = await api('/api/parent/task-templates'); state.templates = data.templates; renderTemplateGroups(); }
 function renderTemplateCategoryIcon() { const category = state.categories.find(item => item.id === Number($('#template-category').value)) || state.categories[0]; $('#template-category-icon').innerHTML = category ? categoryIconMarkup(category.icon) : ''; }
 function resourcePreviewRows(resources, removeAttribute) {
-  return resources.map((resource, index) => `<div class="resource-preview-row">${resource.kind === 'image' && resource.data ? `<img src="${resource.data}" alt="" />` : resource.kind === 'video' && resource.data ? `<video src="${resource.data}"></video>` : `<span class="resource-file-icon">${icon('file')}</span>`}<div><b>${escapeHtml(resource.name)}</b><small>${resource.existing ? '已保存的资料' : '待上传'}</small></div><button type="button" class="icon-button" ${removeAttribute}="${index}" aria-label="移除${escapeHtml(resource.name)}" title="移除">${icon('x')}</button></div>`).join('');
+  return resources.map((resource, index) => { const kind = resourceKindOf(resource); return `<div class="resource-preview-row">${kind === 'image' && resource.data ? `<img src="${resource.data}" alt="" />` : kind === 'video' && resource.data ? `<video src="${resource.data}" controls preload="metadata"></video>` : kind === 'audio' && resource.data ? `<audio src="${resource.data}" controls preload="metadata"></audio>` : `<span class="resource-file-icon">${icon(kind === 'audio' ? 'volume-2' : 'file')}</span>`}<div><b>${escapeHtml(resource.name)}</b><small>${resource.existing ? '已保存的资料' : '待上传'}</small></div><button type="button" class="icon-button" ${removeAttribute}="${index}" aria-label="移除${escapeHtml(resource.name)}" title="移除">${icon('x')}</button></div>`; }).join('');
 }
 function renderTemplateResourcePreview() {
   const preview = $('#template-resource-preview');
@@ -627,11 +648,12 @@ function taskResourceMarkup(task) {
   if (!task.hasResource) return '';
   const resources = task.resources?.length ? task.resources : [{ name: task.resourceName, kind: task.resourceKind, data: task.resourceData }];
   return `<section class="task-resource-section"><h3>任务资料 <small>${resources.length} 个文件</small></h3><div class="task-resource-list">${resources.map((resource, index) => {
-    const name = resource.name || (resource.kind === 'video' ? '任务视频' : resource.kind === 'image' ? '任务图片' : '任务文件');
-    const media = resource.kind === 'image' ? `<img src="${escapeHtml(resource.data)}" alt="${escapeHtml(name)}预览" />` : `<span class="resource-file-icon">${icon(resource.kind === 'video' ? 'play' : 'file')}</span>`;
-    const preview = resource.kind === 'file' ? '' : `<button type="button" class="resource-action-button" data-preview-task-resource="${index}">${icon('eye')}<span>预览</span></button>`;
+    const kind = resourceKindOf(resource);
+    const name = resource.name || (kind === 'video' ? '任务视频' : kind === 'audio' ? '任务语音' : kind === 'image' ? '任务图片' : '任务文件');
+    const media = kind === 'image' ? `<img src="${escapeHtml(resource.data)}" alt="${escapeHtml(name)}预览" />` : kind === 'audio' ? `<audio src="${escapeHtml(resource.data)}" controls preload="metadata" aria-label="${escapeHtml(name)}"></audio>` : kind === 'video' ? `<video src="${escapeHtml(resource.data)}" controls preload="metadata" aria-label="${escapeHtml(name)}"></video>` : `<span class="resource-file-icon">${icon('file')}</span>`;
+    const preview = kind === 'file' ? '' : `<button type="button" class="resource-action-button" data-preview-task-resource="${index}">${icon('eye')}<span>预览</span></button>`;
     const download = resource.data ? `<a class="resource-action-button resource-download-button" href="${escapeHtml(resource.data)}" download="${escapeHtml(name)}">${icon('download')}<span>下载</span></a>` : '';
-    return `<article class="task-resource-card">${media}<span class="task-resource-copy"><b>${escapeHtml(name)}</b><small>${resource.kind === 'video' ? '视频资料' : resource.kind === 'image' ? '图片资料' : '学习文件'}</small></span><span class="task-resource-actions">${preview}${download}</span></article>`;
+    return `<article class="task-resource-card">${media}<span class="task-resource-copy"><b>${escapeHtml(name)}</b><small>${kind === 'video' ? '视频资料·可播放' : kind === 'audio' ? '语音资料·可播放' : kind === 'image' ? '图片资料' : '学习文件'}</small></span><span class="task-resource-actions">${preview}${download}</span></article>`;
   }).join('')}</div></section>`;
 }
 function syncStudentTask(task) {
@@ -643,8 +665,8 @@ function syncStudentTask(task) {
 function taskDetailStatus(task) { return (statusMeta[task.status] || statusMeta.not_started)[1]; }
 function feedbackTypeLabel(type) { return ({ photo_or_video: '图片或视频', photo: '仅图片', video: '仅视频', none: '无需反馈' })[type] || '图片或视频'; }
 function taskDetailFacts(task, includeStudent = false) {
-  const schedule = task.isRecurring ? `<p><b>重复规则</b>${escapeHtml(recurringLabel(task))} · ${escapeHtml(task.seriesStartDate)} 至 ${escapeHtml(task.seriesEndDate)}</p>` : task.isDateRange ? `<p><b>完成期限</b>${escapeHtml(task.availableStartDate)} 至 ${escapeHtml(task.availableEndDate)}，范围内任意一天均可完成</p>` : '';
-  return `<div class="review-task-details task-detail-facts">${includeStudent ? `<p><b>学生</b>${escapeHtml(task.studentName || '未知学生')}</p>` : ''}<p><b>${task.isDateRange ? '截止日期' : '任务日期'}</b>${escapeHtml(task.date)}</p><p><b>当前状态</b>${escapeHtml(taskDetailStatus(task))}</p><p><b>预计时长</b>${task.duration || 0} 分钟</p><p><b>奖励星星</b>${task.stars || 0} 颗</p><p><b>反馈与审核</b>${feedbackTypeLabel(task.feedbackType)} · ${task.needsReview ? '需要家长审核' : '无需审核'}</p>${schedule}<p><b>任务说明</b>${escapeHtml(task.detail || '暂无任务说明')}</p></div>`;
+  const schedule = task.isRecurring ? `<p class="task-schedule-fact"><b>重复规则</b>${escapeHtml(recurringLabel(task))} · ${escapeHtml(task.seriesStartDate)} 至 ${escapeHtml(task.seriesEndDate)}</p>` : task.isDateRange ? `<p class="task-schedule-fact"><b>完成期限</b>${escapeHtml(task.availableStartDate)} 至 ${escapeHtml(task.availableEndDate)}，范围内任意一天均可完成</p>` : '';
+  return `<div class="review-task-details task-detail-facts">${includeStudent ? `<p><b>学生</b>${escapeHtml(task.studentName || '未知学生')}</p>` : ''}<p><b>${task.isDateRange ? '截止日期' : '任务日期'}</b>${escapeHtml(task.date)}</p><p><b>当前状态</b>${escapeHtml(taskDetailStatus(task))}</p><p><b>预计时长</b>${task.duration || 0} 分钟</p><p><b>奖励星星</b>${task.stars || 0} 颗</p><p class="task-detail-feedback-fact"><b>反馈与审核</b>${feedbackTypeLabel(task.feedbackType)} · ${task.needsReview ? '需要家长审核' : '无需审核'}</p>${schedule}<p class="task-detail-description"><b>任务说明</b>${multilineText(task.detail, '暂无任务说明')}</p></div>`;
 }
 function taskFeedbackEvidence(task) {
   if (!task.hasFeedback) return '';
@@ -665,7 +687,7 @@ async function openStudentTaskDetail(taskId) {
     const canWork = ['not_started', 'in_progress', 'needs_more'].includes(task.status) && rangeIsActive(task);
     const [, , action] = statusMeta[task.status] || statusMeta.not_started;
     const resultNote = task.status === 'completed' && task.encouragement ? `<p class="feedback-note"><b>家长鼓励</b>${escapeHtml(task.encouragement)}</p>` : '';
-    $('#task-detail-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(task.icon)} ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2>${taskDetailFacts(task)}${taskResourceMarkup(task)}${resultNote}<div class="modal-actions"><button class="secondary-button dialog-cancel">关闭</button>${canWork ? `<button class="primary-button" data-start-task="${task.id}">${action}</button>` : ''}</div></div>`;
+    $('#task-detail-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(task.icon)} ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2>${taskDetailFacts(task)}${taskResourceMarkup(task)}${resultNote}${canWork ? `<div class="modal-actions"><button class="primary-button" data-start-task="${task.id}">${action}</button></div>` : ''}</div>`;
     refreshIcons();
   } catch (err) { $('#task-detail-dialog').close(); showToast(err.message); }
 }
@@ -676,7 +698,7 @@ async function openParentTaskDetail(taskId) {
     const task = (await api(`/api/parent/tasks/${taskId}`, { silent: true })).task;
     state.activeTaskDetail = task;
     const resultNote = task.encouragement ? `<p class="feedback-note"><b>家长反馈</b>${escapeHtml(task.encouragement)}</p>` : '';
-    $('#task-detail-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(task.icon)} ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2>${taskDetailFacts(task, true)}${taskResourceMarkup(task)}${taskFeedbackEvidence(task)}${resultNote}<div class="modal-actions"><button class="secondary-button dialog-cancel">关闭</button>${task.status === 'pending_review' ? `<button class="primary-button" data-review="${task.id}">进入审核</button>` : ''}</div></div>`;
+    $('#task-detail-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(task.icon)} ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2>${taskDetailFacts(task, true)}${taskResourceMarkup(task)}${taskFeedbackEvidence(task)}${resultNote}${task.status === 'pending_review' ? `<div class="modal-actions"><button class="primary-button" data-review="${task.id}">进入审核</button></div>` : ''}</div>`;
     refreshIcons();
   } catch (err) { $('#task-detail-dialog').close(); showToast(err.message); }
 }
@@ -686,7 +708,7 @@ async function openTemplateDetail(templateId, { readOnly = false } = {}) {
     const template = (await api(`/api/parent/task-templates/${templateId}`, { silent: true })).template;
     state.activeTaskDetail = template;
     const actions = template.isOwner && !readOnly ? `<button class="secondary-button" data-edit-template="${template.id}">${icon('pencil')} 编辑</button><button class="primary-button danger-button" data-delete-template="${template.id}">${icon('trash')} 删除</button>` : '';
-    $('#task-detail-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(template.icon)} ${escapeHtml(template.category)}</p><h2>${escapeHtml(template.title)}</h2><div class="review-task-details task-detail-facts template-detail-facts"><p><b>创建人</b>${escapeHtml(template.creatorName)}</p><p><b>开放范围</b>${escapeHtml(templateVisibility(template))}</p><p><b>预计时长</b>${template.duration} 分钟</p><p><b>奖励星星</b>${template.stars} 颗</p><p><b>反馈与审核</b>${feedbackTypeLabel(template.feedbackType)} · ${template.needsReview ? '需要审核' : '无需审核'}</p><p><b>任务说明</b>${escapeHtml(template.detail || '暂无任务说明')}</p></div>${taskResourceMarkup(template)}<div class="modal-actions"><button class="secondary-button dialog-cancel">关闭</button>${actions}</div></div>`;
+    $('#task-detail-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(template.icon)} ${escapeHtml(template.category)}</p><h2>${escapeHtml(template.title)}</h2><div class="review-task-details task-detail-facts template-detail-facts"><p><b>创建人</b>${escapeHtml(template.creatorName)}</p><p><b>开放范围</b>${escapeHtml(templateVisibility(template))}</p><p><b>预计时长</b>${template.duration} 分钟</p><p><b>奖励星星</b>${template.stars} 颗</p><p><b>反馈与审核</b>${feedbackTypeLabel(template.feedbackType)} · ${template.needsReview ? '需要审核' : '无需审核'}</p><p><b>任务说明</b>${multilineText(template.detail, '暂无任务说明')}</p></div>${taskResourceMarkup(template)}${actions ? `<div class="modal-actions">${actions}</div>` : ''}</div>`;
     refreshIcons();
   } catch (err) { $('#task-detail-dialog').close(); showToast(err.message); }
 }
@@ -703,7 +725,7 @@ async function openTask(task) {
   const accept = task.feedbackType === 'photo' ? 'image/*' : task.feedbackType === 'video' ? 'video/mp4,video/webm' : 'image/*,video/mp4,video/webm';
   const savedPreview = task.feedbackData ? (task.feedbackKind === 'video' ? `<video src="${task.feedbackData}" controls></video><b>${escapeHtml(task.feedbackName || '已保存的视频')}</b>` : `<img src="${task.feedbackData}" alt="已保存的反馈图片" /><b>${escapeHtml(task.feedbackName || '已保存的图片')}</b>`) : '<span>尚未选择反馈文件</span>';
   const feedback = task.feedbackType === 'none' ? `<div class="no-feedback-note">此任务不需要上传反馈，完成后直接提交即可。</div><label class="task-note-label">补充说明<textarea id="task-feedback-note" maxlength="300" placeholder="可以写下完成过程或心得（选填）">${escapeHtml(task.feedbackNote)}</textarea></label>` : `<div class="task-feedback-upload file-drop-zone" data-file-drop-target="task-feedback-file"><input id="task-feedback-file" type="file" accept="${accept}" hidden /><div class="feedback-drop-copy">${icon('upload-cloud')}<span><b class="required-mark" aria-hidden="true">*</b>拖拽图片或视频到这里</span></div><button type="button" class="secondary-button" id="pick-task-feedback">选择图片或视频</button><div id="task-feedback-preview">${savedPreview}</div><label>补充说明<textarea id="task-feedback-note" maxlength="300" placeholder="可以写下完成过程或心得（选填）">${escapeHtml(task.feedbackNote)}</textarea></label></div>`;
-  $('#task-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(task.icon)} ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2><p>${escapeHtml(task.detail)}</p>${taskResourceMarkup(task)}<div class="modal-summary"><p>预计 ${task.duration || 15} 分钟</p><p>完成后可获得 ⭐ ${task.stars} 颗星星</p><p>${task.feedbackType === 'none' ? '不需要提交反馈' : '需要提交学习反馈'}</p></div>${readonly ? `<div class="no-feedback-note">${task.status === 'completed' ? '该任务已经完成。' : '反馈已提交，正在等待家长审核。'}</div><div class="modal-actions"><button class="primary-button" id="modal-close-done">知道啦</button></div>` : `${feedback}<p class="login-error" id="task-submit-error"></p><div class="modal-actions"><button class="secondary-button" id="save-draft">保存草稿</button><button class="primary-button" data-submit-task="${task.id}">${action === '补充反馈' ? '确认补充' : '确认提交'}</button></div>`}</div>`;
+  $('#task-modal-content').innerHTML = `<div class="modal-content"><p class="eyebrow task-dialog-category">${categoryIconMarkup(task.icon)} ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2><p class="task-detail-description">${multilineText(task.detail, '暂无任务说明')}</p>${taskResourceMarkup(task)}<div class="modal-summary"><p>预计 ${task.duration || 15} 分钟</p><p>完成后可获得 ⭐ ${task.stars} 颗星星</p><p>${task.feedbackType === 'none' ? '不需要提交反馈' : '需要提交学习反馈'}</p></div>${readonly ? `<div class="no-feedback-note">${task.status === 'completed' ? '该任务已经完成。' : '反馈已提交，正在等待家长审核。'}</div>` : `${feedback}<p class="login-error" id="task-submit-error"></p><div class="modal-actions"><button class="secondary-button" id="save-draft">保存草稿</button><button class="primary-button" data-submit-task="${task.id}">${action === '补充反馈' ? '确认补充' : '确认提交'}</button></div>`}</div>`;
   $('#task-detail-dialog').close(); $('#task-dialog').showModal();
   decorateRequiredFields($('#task-dialog'));
   refreshIcons();
@@ -713,7 +735,7 @@ function openReview(task) {
   const feedback = task.feedbackData
     ? `<div class="review-evidence">${task.feedbackKind === 'video' ? '<span class="video-placeholder">▶</span>' : `<img src="${escapeHtml(task.feedbackData)}" alt="学生上传的任务反馈" />`}<span class="review-evidence-copy"><b>${escapeHtml(feedbackName)}</b><small>学生提交的学习反馈</small></span><span class="review-evidence-actions"><button type="button" class="resource-action-button" data-preview-feedback="${task.id}">${icon('eye')}<span>预览</span></button><a class="resource-action-button resource-download-button" href="${escapeHtml(task.feedbackData)}" download="${escapeHtml(feedbackName)}">${icon('download')}<span>下载</span></a></span></div>`
     : `<div class="no-feedback-note">${task.feedbackType === 'none' ? '此任务不需要提交图片或视频反馈。' : '当前没有可预览的附件，可以要求学生补充反馈。'}</div>`;
-  $('#review-modal-content').innerHTML = `<div class="modal-content review-modal"><p class="eyebrow">${escapeHtml(task.studentName)} · ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2><div class="review-task-details"><p><b>${task.isDateRange ? '完成期限' : '任务日期'}</b>${escapeHtml(task.isDateRange ? `${task.availableStartDate} 至 ${task.availableEndDate}` : task.date)}</p><p><b>预计时长</b>${task.duration || 0} 分钟</p><p><b>任务要求</b>${escapeHtml(task.detail)}</p><p><b>提交时间</b>${formatDateTime(task.submittedAt)}</p></div>${taskResourceMarkup(task)}${feedback}${task.feedbackNote ? `<p class="feedback-note"><b>学生说明</b>${escapeHtml(task.feedbackNote)}</p>` : ''}<div class="review-reward-form"><label>奖励星星<span class="number-with-unit"><input id="review-stars" type="number" min="1" step="1" value="${task.stars}" required /><b>颗</b></span></label><label>鼓励或补充说明<textarea id="review-message" maxlength="180" placeholder="写一句鼓励，或说明需要补充的内容">完成得很棒！</textarea></label></div><p class="login-error" id="review-error"></p><div class="review-actions"><button class="supplement" data-more="${task.id}">需要补充</button><button class="primary-button" data-approve="${task.id}">✓ 通过并奖励</button></div></div>`;
+  $('#review-modal-content').innerHTML = `<div class="modal-content review-modal"><p class="eyebrow">${escapeHtml(task.studentName)} · ${escapeHtml(task.category)}</p><h2>${escapeHtml(task.title)}</h2><div class="review-task-details"><p><b>${task.isDateRange ? '完成期限' : '任务日期'}</b>${escapeHtml(task.isDateRange ? `${task.availableStartDate} 至 ${task.availableEndDate}` : task.date)}</p><p><b>预计时长</b>${task.duration || 0} 分钟</p><p><b>任务要求</b>${multilineText(task.detail, '暂无任务说明')}</p><p><b>提交时间</b>${formatDateTime(task.submittedAt)}</p></div>${taskResourceMarkup(task)}${feedback}${task.feedbackNote ? `<p class="feedback-note"><b>学生说明</b>${multilineText(task.feedbackNote)}</p>` : ''}<div class="review-reward-form"><label>奖励星星<span class="number-with-unit"><input id="review-stars" type="number" min="1" step="1" value="${task.stars}" required /><b>颗</b></span></label><label>鼓励或补充说明<textarea id="review-message" maxlength="180" placeholder="写一句鼓励，或说明需要补充的内容">完成得很棒！</textarea></label></div><p class="login-error" id="review-error"></p><div class="review-actions"><button class="supplement" data-more="${task.id}">需要补充</button><button class="primary-button" data-approve="${task.id}">✓ 通过并奖励</button></div></div>`;
   $('#review-dialog').showModal();
   decorateRequiredFields($('#review-dialog'));
   refreshIcons();
@@ -897,7 +919,7 @@ document.addEventListener('click', async event => {
   const startTask = event.target.closest('[data-start-task]'); if (startTask && state.user?.role === 'student') { const taskId = Number(startTask.dataset.startTask); const task = state.tasks.find(item => item.id === taskId) || state.studentListTasks.find(item => item.id === taskId) || { id: taskId, status: 'in_progress' }; await openTask(task); return; }
   const taskElement = event.target.closest('[data-task]'); if (taskElement && state.user?.role === 'student' && !event.target.closest('button,a,input,select,textarea')) { await openStudentTaskDetail(Number(taskElement.dataset.task)); return; }
   const parentTaskElement = event.target.closest('[data-parent-task]'); if (parentTaskElement && state.user && state.user.role !== 'student' && !event.target.closest('button,a,input,select,textarea')) { await openParentTaskDetail(Number(parentTaskElement.dataset.parentTask)); return; }
-  const previewTaskResource = event.target.closest('[data-preview-task-resource]'); if (previewTaskResource) { const task = state.activeTaskDetail; const resource = task?.resources?.[Number(previewTaskResource.dataset.previewTaskResource)] || (task?.resourceData ? { data: task.resourceData, kind: task.resourceKind, name: task.resourceName } : null); if (!resource?.data) return; $('#feedback-preview-content').innerHTML = resource.kind === 'video' ? `<video src="${resource.data}" controls autoplay></video>` : `<img src="${resource.data}" alt="${escapeHtml(resource.name || '任务资料')}" />`; $('#feedback-preview-dialog').showModal(); return; }
+  const previewTaskResource = event.target.closest('[data-preview-task-resource]'); if (previewTaskResource) { const task = state.activeTaskDetail; const resource = task?.resources?.[Number(previewTaskResource.dataset.previewTaskResource)] || (task?.resourceData ? { data: task.resourceData, kind: task.resourceKind, name: task.resourceName, mime: task.resourceMime } : null); if (!resource?.data) return; const kind = resourceKindOf(resource); $('#feedback-preview-content').innerHTML = kind === 'video' ? `<video src="${resource.data}" controls autoplay></video>` : kind === 'audio' ? `<audio src="${resource.data}" controls autoplay></audio>` : `<img src="${resource.data}" alt="${escapeHtml(resource.name || '任务资料')}" />`; $('#feedback-preview-dialog').showModal(); return; }
   if (event.target.id === 'pick-task-feedback') { $('#task-feedback-file')?.click(); return; }
   if (event.target.closest('[data-preview-parent-feedback]')) { const task = state.activeTaskDetail; if (!task?.feedbackData) return; $('#feedback-preview-content').innerHTML = task.feedbackKind === 'video' ? `<video src="${task.feedbackData}" controls autoplay></video>` : `<img src="${task.feedbackData}" alt="学生上传的任务反馈大图" />`; $('#feedback-preview-dialog').showModal(); return; }
   const previewFeedback = event.target.closest('[data-preview-feedback]'); if (previewFeedback) { const task = state.reviews.find(item => item.id === Number(previewFeedback.dataset.previewFeedback)); if (!task?.feedbackData) return; $('#feedback-preview-content').innerHTML = task.feedbackKind === 'video' ? `<video src="${task.feedbackData}" controls autoplay></video>` : `<img src="${task.feedbackData}" alt="学生上传的任务反馈大图" />`; $('#feedback-preview-dialog').showModal(); return; }
@@ -920,7 +942,7 @@ document.addEventListener('change', async event => {
     const files = [...event.target.files]; if (!files.length) return; const error = $('#template-error'); error.textContent = '';
     if (state.templateResources.length + files.length > 5) { event.target.value = ''; error.textContent = '任务资料最多上传 5 个文件'; return; }
     beginLoading();
-    try { for (const file of files) state.templateResources.push({ name: file.name, data: await prepareTaskResource(file), kind: file.type.startsWith('image/') ? 'image' : file.type.startsWith('video/') ? 'video' : 'file', mime: file.type, existing: false }); state.removeTemplateResource = true; renderTemplateResourcePreview(); }
+    try { for (const file of files) state.templateResources.push({ name: file.name, data: await prepareTaskResource(file), kind: taskResourceKind(file), mime: file.type, existing: false }); state.removeTemplateResource = true; renderTemplateResourcePreview(); }
     catch (err) { error.textContent = err.message; }
     finally { endLoading(); event.target.value = ''; }
     return;
@@ -929,7 +951,7 @@ document.addEventListener('change', async event => {
     const files = [...event.target.files]; if (!files.length) return; const error = $('#assignment-error'); error.textContent = '';
     if (state.taskResources.length + files.length > 5) { event.target.value = ''; error.textContent = '任务资料最多上传 5 个文件'; return; }
     beginLoading();
-    try { for (const file of files) state.taskResources.push({ name: file.name, data: await prepareTaskResource(file), kind: file.type.startsWith('image/') ? 'image' : file.type.startsWith('video/') ? 'video' : 'file', mime: file.type, existing: false }); state.removeTaskResource = true; renderAssignmentResourcePreview(); }
+    try { for (const file of files) state.taskResources.push({ name: file.name, data: await prepareTaskResource(file), kind: taskResourceKind(file), mime: file.type, existing: false }); state.removeTaskResource = true; renderAssignmentResourcePreview(); }
     catch (err) { error.textContent = err.message; }
     finally { endLoading(); event.target.value = ''; }
     return;

@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 const DATA_URL_PATTERN = /^data:([a-zA-Z0-9][a-zA-Z0-9.+-]*\/[a-zA-Z0-9][a-zA-Z0-9.+-]*);base64,([A-Za-z0-9+/]+={0,2})$/;
 const extensionByMime = new Map([
   ['image/png', '.png'], ['image/jpeg', '.jpg'], ['image/jpg', '.jpg'], ['image/webp', '.webp'],
-  ['image/gif', '.gif'], ['image/avif', '.avif'], ['video/mp4', '.mp4'], ['video/webm', '.webm'],
+  ['image/gif', '.gif'], ['image/avif', '.avif'], ['audio/mpeg', '.mp3'], ['audio/mp3', '.mp3'], ['audio/mp4', '.m4a'], ['audio/x-m4a', '.m4a'], ['audio/wav', '.wav'], ['audio/x-wav', '.wav'], ['audio/ogg', '.ogg'], ['audio/webm', '.weba'], ['video/mp4', '.mp4'], ['video/webm', '.webm'],
   ['application/pdf', '.pdf'], ['text/plain', '.txt'], ['application/zip', '.zip'],
   ['application/msword', '.doc'], ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx'],
   ['application/vnd.ms-excel', '.xls'], ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx'],

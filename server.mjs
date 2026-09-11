@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { mkdirSync, existsSync, readFileSync, createReadStream } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, createReadStream, statSync } from 'node:fs';
 import { extname, join, normalize, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
@@ -153,7 +153,8 @@ function normalizeTaskResource(value, name) {
   if (['image/svg+xml', 'text/html', 'application/xhtml+xml', 'application/javascript', 'text/javascript'].includes(mime)) return null;
   const previewImage = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif', 'image/avif'].includes(mime);
   const previewVideo = ['video/mp4', 'video/webm'].includes(mime);
-  return { data: value, name: clean(name, 120) || '任务资料', mime, kind: previewImage ? 'image' : previewVideo ? 'video' : 'file' };
+  const previewAudio = mime.startsWith('audio/');
+  return { data: value, name: clean(name, 120) || '任务资料', mime, kind: previewImage ? 'image' : previewVideo ? 'video' : previewAudio ? 'audio' : 'file' };
 }
 function normalizeTaskResources(body) {
   const supplied = Array.isArray(body.resources)
@@ -420,6 +421,15 @@ function ensureBuiltInAdmin() {
 }
 
 function publicUser(user) { return { id: user.id, username: user.username, role: user.role, displayName: user.display_name, avatar: signStoredUrl(user.avatar), mustChangePassword: Boolean(user.must_change_password) }; }
+function storedResourceKind(resource) {
+  const mime = String(resource?.mime || '').toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  const extension = String(resource?.name || '').toLowerCase().split('.').pop();
+  if (['mp3', 'm4a', 'aac', 'wav', 'ogg', 'oga', 'weba', 'flac'].includes(extension)) return 'audio';
+  return resource?.kind || 'file';
+}
 function linkedResources(ownerType, ownerId, legacyResourceId, includeData = false) {
   const table = ownerType === 'template' ? 'template_resource_links' : 'task_resource_links';
   const key = ownerType === 'template' ? 'template_id' : 'task_id';
@@ -429,7 +439,7 @@ function linkedResources(ownerType, ownerId, legacyResourceId, includeData = fal
   if (!resources.length && legacyResourceId) {
     resources = db.prepare(`SELECT id, name, mime, kind${includeData ? ', url, data' : ''} FROM task_resources WHERE id = ?`).all(legacyResourceId);
   }
-  return resources.map(resource => ({ id: resource.id, name: resource.name, mime: resource.mime, kind: resource.kind, ...(includeData ? { data: signStoredUrl(resource.url || resource.data) } : {}) }));
+  return resources.map(resource => ({ id: resource.id, name: resource.name, mime: resource.mime, kind: storedResourceKind(resource), ...(includeData ? { data: signStoredUrl(resource.url || resource.data) } : {}) }));
 }
 async function storeResources(resources, folder) {
   const stored = [];
@@ -550,19 +560,36 @@ migrate();
 seed();
 ensureBuiltInAdmin();
 
-const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.avif': 'image/avif', '.mp4': 'video/mp4', '.webm': 'video/webm', '.pdf': 'application/pdf', '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8' };
+const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.avif': 'image/avif', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.weba': 'audio/webm', '.mp4': 'video/mp4', '.webm': 'video/webm', '.pdf': 'application/pdf', '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8' };
 function serveStatic(req, res, pathname) {
   const uploaded = localUploadPath(dataDir, pathname);
   if (uploaded) {
     if (storageDriver() !== 'local' || !existsSync(uploaded)) { res.writeHead(404); res.end('Not found'); return; }
-    res.writeHead(200, { 'content-type': mimeTypes[extname(uploaded)] || 'application/octet-stream', 'x-content-type-options': 'nosniff', 'cache-control': 'public, max-age=31536000, immutable' });
-    createReadStream(uploaded).pipe(res); return;
+    serveLocalFile(req, res, uploaded, mimeTypes[extname(uploaded)] || 'application/octet-stream'); return;
   }
   const requested = pathname === '/' ? '/index.html' : pathname;
   const file = normalize(join(root, requested));
   if (!file.startsWith(root) || !existsSync(file)) { res.writeHead(404); res.end('Not found'); return; }
   res.writeHead(200, { 'content-type': mimeTypes[extname(file)] || 'application/octet-stream', 'x-content-type-options': 'nosniff', 'cache-control': requested.includes('/assets/') ? 'public, max-age=86400' : 'no-cache' });
   createReadStream(file).pipe(res);
+}
+function serveLocalFile(req, res, file, contentType) {
+  const size = statSync(file).size;
+  const range = req.headers.range;
+  const baseHeaders = { 'content-type': contentType, 'accept-ranges': 'bytes', 'x-content-type-options': 'nosniff', 'cache-control': 'public, max-age=31536000, immutable' };
+  if (!range) {
+    res.writeHead(200, { ...baseHeaders, 'content-length': size });
+    if (req.method !== 'HEAD') createReadStream(file).pipe(res); else res.end();
+    return;
+  }
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+  if (!match || (!match[1] && !match[2])) { res.writeHead(416, { 'content-range': `bytes */${size}` }); res.end(); return; }
+  let start = match[1] ? Number(match[1]) : Math.max(0, size - Number(match[2]));
+  let end = match[2] ? Number(match[2]) : size - 1;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start >= size || end < start) { res.writeHead(416, { 'content-range': `bytes */${size}` }); res.end(); return; }
+  end = Math.min(end, size - 1);
+  res.writeHead(206, { ...baseHeaders, 'content-length': end - start + 1, 'content-range': `bytes ${start}-${end}/${size}` });
+  if (req.method !== 'HEAD') createReadStream(file, { start, end }).pipe(res); else res.end();
 }
 
 const server = createServer(async (req, res) => {

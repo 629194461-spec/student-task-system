@@ -247,11 +247,23 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   const genericFileTask = await assign(secondId, '通用文件资料测试', addDays(currentDate, 4), true, [{ name: '练习资料.bin', data: 'data:application/octet-stream;base64,AQID' }]);
   assert.equal(genericFileTask.response.status, 201, 'generic files under 6 MB are accepted as downloadable resources');
 
+  const audioTask = await assign(secondId, '语音资料测试', addDays(currentDate, 5), true, [{ name: '词汇朗读.mp3', mime: 'audio/mpeg', kind: 'audio', data: 'data:audio/mpeg;base64,SUQzAwAAAAA=' }]);
+  assert.equal(audioTask.response.status, 201, 'audio resources are accepted');
+  const audioDetail = await request(`/api/parent/tasks/${audioTask.body.taskIds[0]}`, { cookie: admin });
+  assert.equal(audioDetail.body.task.resources[0].kind, 'audio');
+  assert.equal(audioDetail.body.task.resources[0].mime, 'audio/mpeg');
+  const audioUrl = audioDetail.body.task.resources[0].data;
+  const audioRange = await fetch(`${base}${audioUrl}`, { headers: { range: 'bytes=0-2' } });
+  assert.equal(audioRange.status, 206, 'local audio resources support range requests');
+  assert.equal(audioRange.headers.get('accept-ranges'), 'bytes');
+  assert.equal(audioRange.headers.get('content-type'), 'audio/mpeg');
+  assert.equal(Buffer.from(await audioRange.arrayBuffer()).length, 3);
+
   const database = new DatabaseSync(join(process.env.TEST_DATA_DIR, 'learning-planet.db'), { readOnly: true });
   try {
     assert.equal(database.prepare("SELECT COUNT(*) AS count FROM task_resources WHERE data LIKE 'data:%;base64,%'").get().count, 0, 'resource binary data must not remain in SQLite');
     assert.equal(database.prepare("SELECT COUNT(*) AS count FROM tasks WHERE feedback_data LIKE 'data:%;base64,%'").get().count, 0, 'feedback binary data must not remain in SQLite');
     assert.equal(database.prepare("SELECT COUNT(*) AS count FROM users WHERE avatar LIKE 'data:image/%;base64,%'").get().count, 0, 'avatar binary data must not remain in SQLite');
-    assert.ok(database.prepare("SELECT COUNT(*) AS count FROM task_resources WHERE url LIKE '/uploads/%'").get().count >= 3);
+    assert.ok(database.prepare("SELECT COUNT(*) AS count FROM task_resources WHERE url LIKE '/uploads/%'").get().count >= 4);
   } finally { database.close(); }
 });
