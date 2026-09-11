@@ -19,23 +19,32 @@ const categoryIcons = [
 let activeRequests = 0;
 let loaderTimer = null;
 let recoveryEmailTimer = null;
-function resetRecoveryEmailTimer() {
-  if (recoveryEmailTimer) { clearInterval(recoveryEmailTimer); recoveryEmailTimer = null; }
-  const button = $('#send-recovery-email');
-  if (button) { button.disabled = false; button.textContent = '发送验证邮件'; }
-}
-function startRecoveryEmailTimer() {
-  resetRecoveryEmailTimer();
+let recoveryEmailCooldownUntil = 0;
+function renderRecoveryEmailTimer() {
   const button = $('#send-recovery-email');
   if (!button) return;
-  let remaining = 60;
-  button.disabled = true;
-  button.textContent = `重新发送（${remaining}s）`;
-  recoveryEmailTimer = setInterval(() => {
-    remaining -= 1;
-    if (remaining <= 0) { resetRecoveryEmailTimer(); return; }
-    button.textContent = `重新发送（${remaining}s）`;
-  }, 1000);
+  const remaining = Math.ceil((recoveryEmailCooldownUntil - Date.now()) / 1000);
+  if (remaining > 0) { button.disabled = true; button.textContent = `重新发送（${remaining}s）`; return; }
+  recoveryEmailCooldownUntil = 0;
+  button.disabled = false;
+  button.textContent = '发送验证邮件';
+}
+function clearRecoveryEmailTimer() {
+  if (recoveryEmailTimer) { clearInterval(recoveryEmailTimer); recoveryEmailTimer = null; }
+  recoveryEmailCooldownUntil = 0;
+  renderRecoveryEmailTimer();
+}
+function restoreRecoveryEmailTimer() {
+  if (recoveryEmailTimer) clearInterval(recoveryEmailTimer);
+  recoveryEmailTimer = null;
+  renderRecoveryEmailTimer();
+  if (recoveryEmailCooldownUntil > Date.now()) recoveryEmailTimer = setInterval(renderRecoveryEmailTimer, 1000);
+}
+function startRecoveryEmailTimer() {
+  if (recoveryEmailTimer) clearInterval(recoveryEmailTimer);
+  recoveryEmailCooldownUntil = Date.now() + 60000;
+  renderRecoveryEmailTimer();
+  recoveryEmailTimer = setInterval(() => { renderRecoveryEmailTimer(); if (!recoveryEmailCooldownUntil) { clearInterval(recoveryEmailTimer); recoveryEmailTimer = null; } }, 1000);
 }
 function enhancePasswordInputs() {
   $$('input[type="password"]').forEach(input => {
@@ -903,7 +912,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#open-recovery')) { $('#recovery-form').reset(); $('#recovery-reset-fields').hidden = true; $('#recovery-error').textContent = ''; $('#recovery-dialog').showModal(); return; }
   if (event.target.closest('#account-security-button')) { const menu = $('#account-menu'); menu.hidden = !menu.hidden; refreshIcons(); return; }
   if (event.target.id === 'open-account-password') { $('#account-menu').hidden = true; $('#account-password-form').reset(); $('#account-password-error').textContent = ''; $('#account-security-dialog').showModal(); return; }
-  if (event.target.id === 'open-account-email') { $('#account-menu').hidden = true; resetRecoveryEmailTimer(); $('#recovery-email-form').reset(); $('#recovery-email-form').hidden = false; $('#recovery-email-code-wrap').hidden = true; $('#recovery-email-message').textContent = ''; try { const data = await api('/api/auth/recovery-email', { silent: true }); $('#bound-email-status').textContent = data.email ? `当前已绑定：${data.email}` : '尚未绑定找回邮箱'; } catch (err) { $('#bound-email-status').textContent = err.message; } $('#email-settings-dialog').showModal(); return; }
+  if (event.target.id === 'open-account-email') { $('#account-menu').hidden = true; restoreRecoveryEmailTimer(); $('#recovery-email-form').reset(); $('#recovery-email-form').hidden = false; $('#recovery-email-code-wrap').hidden = true; $('#recovery-email-message').textContent = ''; try { const data = await api('/api/auth/recovery-email', { silent: true }); $('#bound-email-status').textContent = data.email ? `当前已绑定：${data.email}` : '尚未绑定找回邮箱'; } catch (err) { $('#bound-email-status').textContent = err.message; } $('#email-settings-dialog').showModal(); return; }
   if (event.target.closest('#logout-button')) { $('#logout-dialog').showModal(); return; }
   if (event.target.id === 'confirm-logout') { try { await api('/api/auth/logout', { method: 'POST' }); } finally { closeDialogs(); closeStudentActionMenu(); state.user = null; $('#username').value = ''; $('#password').value = ''; setLoginRole('student'); displayLogin(); await refreshCaptcha(); } return; }
   const dialogClose = event.target.closest('.modal-close, .dialog-cancel'); if (dialogClose) { dialogClose.closest('dialog')?.close(); return; }
@@ -989,6 +998,15 @@ document.addEventListener('click', async event => {
   const approve = event.target.closest('[data-approve]'); if (approve) { const error = $('#review-error'); try { await api(`/api/parent/tasks/${approve.dataset.approve}/review`, { method: 'POST', body: JSON.stringify({ action: 'approve', stars: Number($('#review-stars').value), message: $('#review-message').value }) }); invalidateStudentDashboardCache(); closeDialogs(); await loadParent(); await loadReviews(); showToast('审核通过，星星已发放'); } catch (err) { error.textContent = err.message; } return; }
   const more = event.target.closest('[data-more]'); if (more) { const error = $('#review-error'); try { await api(`/api/parent/tasks/${more.dataset.more}/review`, { method: 'POST', body: JSON.stringify({ action: 'needs_more', message: $('#review-message').value || '请再补充一点学习反馈。' }) }); invalidateStudentDashboardCache(); closeDialogs(); await loadParent(); await loadReviews(); showToast('已通知学生补充反馈'); } catch (err) { error.textContent = err.message; } return; }
   if (event.target.id === 'save-draft') { const error = $('#task-submit-error'); if (error) error.textContent = ''; try { const result = await api(`/api/student/tasks/${state.activeTaskDetail.id}/draft`, { method: 'PATCH', body: JSON.stringify({ feedbackData: state.taskFeedbackData, feedbackName: state.taskFeedbackName, feedbackNote: $('#task-feedback-note')?.value || '' }) }); invalidateStudentDashboardCache(); syncStudentTask(result.task); closeDialogs(); showToast('草稿已保存，任务状态已更新'); Promise.all([loadStudent(state.studentDate, { force: true, silent: true }), loadStudentTaskList(state.studentTaskFilter, { force: true, silent: true })]).catch(err => showToast(err.message)); } catch (err) { if (error) error.textContent = err.message; else showToast(err.message); } }
+});
+['account-security-dialog', 'email-settings-dialog'].forEach(id => {
+  const dialog = document.getElementById(id);
+  if (!dialog) return;
+  dialog.addEventListener('click', event => {
+    const close = event.target.closest('.modal-close');
+    if (close) { dialog.close(); return; }
+    event.stopPropagation();
+  });
 });
 document.addEventListener('keydown', event => {
   if (!['Enter', ' '].includes(event.key) || !event.target.matches('[data-task], [data-parent-task]')) return;
@@ -1112,7 +1130,7 @@ $('#recovery-email-form').addEventListener('submit', async event => {
 });
 $('#verify-recovery-email').addEventListener('click', async () => {
   const message = $('#recovery-email-message'); message.textContent = '';
-  try { const email = $('#recovery-email').value; await api('/api/auth/recovery-email/verify', { method: 'POST', body: JSON.stringify({ email, code: $('#recovery-email-code').value }) }); resetRecoveryEmailTimer(); $('#bound-email-status').textContent = `当前已绑定：${email}`; $('#recovery-email-form').reset(); $('#recovery-email-form').hidden = true; message.textContent = '邮箱已验证并绑定。'; }
+  try { const email = $('#recovery-email').value; await api('/api/auth/recovery-email/verify', { method: 'POST', body: JSON.stringify({ email, code: $('#recovery-email-code').value }) }); clearRecoveryEmailTimer(); $('#bound-email-status').textContent = `当前已绑定：${email}`; $('#recovery-email-form').reset(); $('#recovery-email-form').hidden = true; message.textContent = '邮箱已验证并绑定。'; }
   catch (err) { message.textContent = err.message; }
 });
 $('#recovery-form').addEventListener('submit', async event => {

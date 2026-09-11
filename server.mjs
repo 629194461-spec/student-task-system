@@ -23,6 +23,8 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const REMEMBER_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 const CAPTCHA_TTL_MS = 1000 * 60 * 5;
 const RECOVERY_CODE_TTL_MS = 1000 * 60 * 5;
+const RECOVERY_CODE_LIMIT_WINDOW_MS = 1000 * 60 * 60;
+const RECOVERY_CODE_LIMIT = 5;
 const WINDOW_MS = 1000 * 60 * 15;
 const MAX_LOGIN_ATTEMPTS = 8;
 const CATEGORY_ICONS = [
@@ -40,6 +42,11 @@ const CATEGORY_ICONS = [
 
 function now() { return new Date().toISOString(); }
 function unix() { return Date.now(); }
+function recoveryCodeLimitReached(email) {
+  const since = new Date(unix() - RECOVERY_CODE_LIMIT_WINDOW_MS).toISOString();
+  const row = db.prepare('SELECT COUNT(*) AS count FROM recovery_codes WHERE target_hash = ? AND created_at > ?').get(hashToken(email), since);
+  return Number(row?.count || 0) >= RECOVERY_CODE_LIMIT;
+}
 const recoveryKey = createHash('sha256').update(process.env.RECOVERY_EMAIL_KEY || 'learning-planet-recovery-email-change-in-production').digest();
 function encryptRecoveryEmail(email) { const iv = randomBytes(12); const cipher = createCipheriv('aes-256-gcm', recoveryKey, iv); const data = Buffer.concat([cipher.update(email, 'utf8'), cipher.final()]); return `${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${data.toString('base64url')}`; }
 function decryptRecoveryEmail(value) { try { const [iv, tag, data] = String(value).split('.').map(part => Buffer.from(part, 'base64url')); const decipher = createDecipheriv('aes-256-gcm', recoveryKey, iv); decipher.setAuthTag(tag); return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8'); } catch { return ''; } }
@@ -325,7 +332,7 @@ function migrate() {
     CREATE TABLE IF NOT EXISTS recovery_codes (
       id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       purpose TEXT NOT NULL, code_hash TEXT NOT NULL, expires_at TEXT NOT NULL,
-      used_at TEXT, request_ip TEXT NOT NULL, created_at TEXT NOT NULL
+      used_at TEXT, request_ip TEXT NOT NULL, target_hash TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS password_reset_tokens (
       id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -403,6 +410,8 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_template_resource_links_resource ON template_resource_links(resource_id);
   `);
   const taskColumns = new Set(db.prepare('PRAGMA table_info(tasks)').all().map(column => column.name));
+  const recoveryCodeColumns = new Set(db.prepare('PRAGMA table_info(recovery_codes)').all().map(column => column.name));
+  if (!recoveryCodeColumns.has('target_hash')) db.exec("ALTER TABLE recovery_codes ADD COLUMN target_hash TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('feedback_kind')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_kind TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('feedback_data')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_data TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('feedback_url')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_url TEXT NOT NULL DEFAULT ''");
@@ -423,6 +432,7 @@ function migrate() {
   const resourceColumns = new Set(db.prepare('PRAGMA table_info(task_resources)').all().map(column => column.name));
   if (!resourceColumns.has('url')) db.exec("ALTER TABLE task_resources ADD COLUMN url TEXT NOT NULL DEFAULT ''");
   db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_series ON tasks(series_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_recovery_codes_target_created ON recovery_codes(target_hash, created_at)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_student_availability ON tasks(student_id, schedule_type, available_start_date, available_end_date)');
   db.exec(`
     INSERT OR IGNORE INTO task_resource_links (task_id, resource_id, sort_order)
@@ -657,10 +667,13 @@ const server = createServer(async (req, res) => {
       if (!['parent', 'admin'].includes(user.role)) { bad(res, 403, '学生账号不能绑定找回邮箱'); return; }
       const body = await readBody(req); const email = clean(body.email, 160).toLowerCase();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { bad(res, 400, '请输入有效邮箱地址'); return; }
+      const currentEmail = db.prepare('SELECT email_hash FROM recovery_emails WHERE user_id = ? AND verified_at IS NOT NULL').get(user.id);
+      if (currentEmail?.email_hash === hashToken(email)) { bad(res, 409, '该邮箱已绑定，无需重复验证'); return; }
       if (db.prepare('SELECT 1 FROM recovery_emails WHERE email_hash = ? AND user_id <> ?').get(hashToken(email), user.id)) { bad(res, 409, '该邮箱已绑定其他账号'); return; }
+      if (recoveryCodeLimitReached(email)) { bad(res, 429, '该邮箱 1 小时内验证码发送次数已达上限，请联系管理员'); return; }
       const code = String(randomInt(100000, 1000000));
       db.prepare("DELETE FROM recovery_codes WHERE user_id = ? AND purpose = 'bind_email'").run(user.id);
-      db.prepare('INSERT INTO recovery_codes (user_id,purpose,code_hash,expires_at,request_ip,created_at) VALUES (?, ?, ?, ?, ?, ?)').run(user.id, 'bind_email', hashToken(code), new Date(unix() + RECOVERY_CODE_TTL_MS).toISOString(), ip, now());
+      db.prepare('INSERT INTO recovery_codes (user_id,purpose,code_hash,expires_at,request_ip,target_hash,created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(user.id, 'bind_email', hashToken(code), new Date(unix() + RECOVERY_CODE_TTL_MS).toISOString(), ip, hashToken(email), now());
       try { await sendRecoveryCode(email, code); } catch { bad(res, 503, '验证码发送失败，请稍后重试'); return; }
       json(res, 200, { ok: true, maskedEmail: maskedEmail(email) }); return;
     }
@@ -680,9 +693,10 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req); const username = clean(body.username, 48); const email = clean(body.email, 160).toLowerCase();
       const user = db.prepare("SELECT users.id, users.role FROM users JOIN recovery_emails ON recovery_emails.user_id = users.id WHERE users.username = ? AND users.active = 1 AND users.role IN ('parent','admin') AND recovery_emails.email_hash = ?").get(username, hashToken(email));
       if (user) {
+        if (recoveryCodeLimitReached(email)) { bad(res, 429, '该邮箱 1 小时内验证码发送次数已达上限，请联系管理员'); return; }
         const code = String(randomInt(100000, 1000000));
         db.prepare("DELETE FROM recovery_codes WHERE user_id = ? AND purpose = 'reset_password'").run(user.id);
-        db.prepare('INSERT INTO recovery_codes (user_id,purpose,code_hash,expires_at,request_ip,created_at) VALUES (?, ?, ?, ?, ?, ?)').run(user.id, 'reset_password', hashToken(code), new Date(unix() + RECOVERY_CODE_TTL_MS).toISOString(), ip, now());
+        db.prepare('INSERT INTO recovery_codes (user_id,purpose,code_hash,expires_at,request_ip,target_hash,created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(user.id, 'reset_password', hashToken(code), new Date(unix() + RECOVERY_CODE_TTL_MS).toISOString(), ip, hashToken(email), now());
         try { await sendRecoveryCode(email, code); } catch { /* Keep the response generic. */ }
       }
       json(res, 200, { ok: true, message: '如果账号和邮箱匹配，验证码已发送，请检查邮箱。' }); return;
