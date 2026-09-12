@@ -398,11 +398,26 @@ function migrate() {
       task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL, stars INTEGER NOT NULL,
       message TEXT, created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS reward_applications (
+      id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      category_id INTEGER REFERENCES task_categories(id) ON DELETE SET NULL, category_name TEXT NOT NULL,
+      category_icon TEXT NOT NULL DEFAULT '', content TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+      completed_at TEXT NOT NULL, requested_stars INTEGER NOT NULL, awarded_stars INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+      parent_message TEXT NOT NULL DEFAULT '', reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      reviewed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS reward_application_resources (
+      application_id INTEGER NOT NULL REFERENCES reward_applications(id) ON DELETE CASCADE,
+      resource_id INTEGER NOT NULL REFERENCES task_resources(id) ON DELETE CASCADE,
+      sort_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(application_id, resource_id)
+    );
     CREATE INDEX IF NOT EXISTS idx_tasks_student_date ON tasks(student_id, task_date);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_tasks_student_status_date ON tasks(student_id, status, task_date);
     CREATE INDEX IF NOT EXISTS idx_parent_students_student_parent ON parent_students(student_id, parent_id);
     CREATE INDEX IF NOT EXISTS idx_rewards_student_created ON rewards(student_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_reward_applications_student_status ON reward_applications(student_id, status, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_task_templates_creator ON task_templates(creator_id);
     CREATE INDEX IF NOT EXISTS idx_task_templates_public ON task_templates(is_public);
     CREATE INDEX IF NOT EXISTS idx_task_templates_category_updated ON task_templates(category_id, updated_at DESC);
@@ -516,6 +531,10 @@ function linkResources(ownerType, ownerId, resourceIds) {
   const insert = db.prepare(`INSERT OR IGNORE INTO ${table} (${key}, resource_id, sort_order) VALUES (?, ?, ?)`);
   resourceIds.forEach((resourceId, index) => insert.run(ownerId, resourceId, index));
 }
+function linkRewardResources(applicationId, resourceIds) {
+  const insert = db.prepare('INSERT OR IGNORE INTO reward_application_resources (application_id, resource_id, sort_order) VALUES (?, ?, ?)');
+  resourceIds.forEach((resourceId, index) => insert.run(applicationId, resourceId, index));
+}
 const taskResourceSummarySql = `
   CASE WHEN EXISTS (SELECT 1 FROM task_resource_links trl WHERE trl.task_id = tasks.id)
     THEN (SELECT COUNT(*) FROM task_resource_links trl WHERE trl.task_id = tasks.id)
@@ -559,6 +578,18 @@ function taskTemplateJson(template, includeResource = false) {
   if (includeResource) result.resourceData = resource?.data || '';
   return result;
 }
+function rewardApplicationJson(application, includeData = false) {
+  const resources = db.prepare(`SELECT task_resources.id, task_resources.name, task_resources.mime, task_resources.kind${includeData ? ', task_resources.url, task_resources.data' : ''}
+    FROM reward_application_resources JOIN task_resources ON task_resources.id = reward_application_resources.resource_id
+    WHERE reward_application_resources.application_id = ? ORDER BY reward_application_resources.sort_order, task_resources.id`).all(application.id)
+    .map(resource => ({ id: resource.id, name: resource.name, mime: resource.mime, kind: storedResourceKind(resource), ...(includeData ? { data: signStoredUrl(resource.url || resource.data) } : {}) }));
+  return { id: application.id, studentId: application.student_id, studentName: application.student_name || '', studentAvatar: signStoredUrl(application.student_avatar || ''),
+    categoryId: application.category_id, category: application.category_name, icon: application.category_icon, content: application.content,
+    detail: application.detail || '', completedAt: application.completed_at, requestedStars: application.requested_stars,
+    awardedStars: application.awarded_stars, status: application.status, parentMessage: application.parent_message || '',
+    reviewedAt: application.reviewed_at, createdAt: application.created_at, updatedAt: application.updated_at,
+    resources, resourceCount: resources.length, hasResource: resources.length > 0 };
+}
 const templateSelectSql = `SELECT task_templates.*, task_categories.name AS category_name,
   task_categories.icon AS category_icon, task_categories.color AS category_color,
   users.display_name AS creator_name, task_resources.name AS resource_name,
@@ -574,7 +605,8 @@ function deleteUnusedResource(resourceId) {
   const usedByTemplate = db.prepare('SELECT 1 FROM task_templates WHERE resource_id = ? LIMIT 1').get(resourceId);
   const usedByTaskLink = db.prepare('SELECT 1 FROM task_resource_links WHERE resource_id = ? LIMIT 1').get(resourceId);
   const usedByTemplateLink = db.prepare('SELECT 1 FROM template_resource_links WHERE resource_id = ? LIMIT 1').get(resourceId);
-  if (!usedByTask && !usedByTemplate && !usedByTaskLink && !usedByTemplateLink) {
+  const usedByRewardLink = db.prepare('SELECT 1 FROM reward_application_resources WHERE resource_id = ? LIMIT 1').get(resourceId);
+  if (!usedByTask && !usedByTemplate && !usedByTaskLink && !usedByTemplateLink && !usedByRewardLink) {
     const resource = db.prepare('SELECT url FROM task_resources WHERE id = ?').get(resourceId);
     db.prepare('DELETE FROM task_resources WHERE id = ?').run(resourceId);
     if (resource?.url) deleteStoredUrl(resource.url, { dataDir }).catch(error => console.error('清理存储文件失败：', error.message));
@@ -795,6 +827,64 @@ const server = createServer(async (req, res) => {
       json(res, 200, { task: taskJson(task, true, true) });
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/student/categories') {
+      const user = requireUser(req, res); if (!user || user.role !== 'student') return;
+      json(res, 200, { categories: db.prepare('SELECT id, name, icon, color FROM task_categories WHERE active = 1 ORDER BY id').all() }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/student/reward-applications') {
+      const user = requireUser(req, res); if (!user || user.role !== 'student') return;
+      const rows = db.prepare(`SELECT reward_applications.*, users.display_name AS student_name, users.avatar AS student_avatar
+        FROM reward_applications JOIN users ON users.id = reward_applications.student_id WHERE student_id = ? ORDER BY created_at DESC, id DESC`).all(user.id);
+      json(res, 200, { applications: rows.map(row => rewardApplicationJson(row)) }); return;
+    }
+    if (req.method === 'GET' && /^\/api\/student\/reward-applications\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || user.role !== 'student') return;
+      const id = Number(url.pathname.split('/').pop());
+      const row = db.prepare(`SELECT reward_applications.*, users.display_name AS student_name, users.avatar AS student_avatar FROM reward_applications JOIN users ON users.id = reward_applications.student_id WHERE reward_applications.id = ? AND student_id = ?`).get(id, user.id);
+      if (!row) { bad(res, 404, '奖励申请不存在'); return; } json(res, 200, { application: rewardApplicationJson(row, true) }); return;
+    }
+    if ((req.method === 'POST' && url.pathname === '/api/student/reward-applications') || (req.method === 'PATCH' && /^\/api\/student\/reward-applications\/\d+$/.test(url.pathname))) {
+      const user = requireUser(req, res); if (!user || user.role !== 'student') return;
+      const editing = req.method === 'PATCH'; const id = editing ? Number(url.pathname.split('/').pop()) : null;
+      const current = editing ? db.prepare('SELECT * FROM reward_applications WHERE id = ? AND student_id = ?').get(id, user.id) : null;
+      if (editing && !current) { bad(res, 404, '奖励申请不存在'); return; }
+      if (editing && !['pending', 'rejected'].includes(current.status)) { bad(res, 409, '审核中的申请不可修改'); return; }
+      const body = await readBody(req, 45 * 1024 * 1024);
+      const categoryId = Number(body.categoryId); const category = db.prepare('SELECT id, name, icon FROM task_categories WHERE id = ? AND active = 1').get(categoryId);
+      const content = clean(body.content, 160); const detail = clean(body.detail, 600); const completedAt = clean(body.completedAt, 10) || businessDate(); const requestedStars = Number(body.requestedStars);
+      const existingResourceIds = normalizeExistingResourceIds(body);
+      const replaceResources = Object.hasOwn(body, 'resources') || Object.hasOwn(body, 'existingResourceIds');
+      const resources = replaceResources && Array.isArray(body.resources) ? body.resources.map(item => normalizeTaskResource(item?.data, item?.name)).filter(Boolean) : [];
+      if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
+      if (!content) { bad(res, 400, '请填写完成内容'); return; }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(completedAt)) { bad(res, 400, '完成时间格式不正确'); return; }
+      if (!Number.isSafeInteger(requestedStars) || requestedStars < 1) { bad(res, 400, '希望获得的星星数需为正整数'); return; }
+      if (!existingResourceIds || (replaceResources && resources.length !== (Array.isArray(body.resources) ? body.resources.length : 0)) || existingResourceIds.length + resources.length > 5 || resources.some(resource => resource.kind !== 'image')) { bad(res, 400, '奖励申请最多上传 5 张图片'); return; }
+      if (!editing && existingResourceIds.length) { bad(res, 400, '新建奖励申请不能引用已有图片'); return; }
+      if (editing && existingResourceIds.some(resourceId => !db.prepare('SELECT 1 FROM reward_application_resources WHERE application_id = ? AND resource_id = ?').get(id, resourceId))) { bad(res, 403, '无权引用该完成图片'); return; }
+      const stored = await storeResources(resources, 'reward-applications'); const timestamp = now();
+      try {
+        db.exec('BEGIN'); let applicationId = id;
+        if (editing) {
+          const oldIds = replaceResources ? db.prepare('SELECT resource_id FROM reward_application_resources WHERE application_id = ?').all(id).map(item => item.resource_id) : [];
+          if (replaceResources) db.prepare('DELETE FROM reward_application_resources WHERE application_id = ?').run(id);
+          db.prepare(`UPDATE reward_applications SET category_id=?, category_name=?, category_icon=?, content=?, detail=?, completed_at=?, requested_stars=?, status='pending', parent_message='', reviewed_by=NULL, reviewed_at=NULL, updated_at=? WHERE id=?`).run(category.id, category.name, category.icon, content, detail, completedAt, requestedStars, timestamp, id);
+          if (replaceResources) { const resourceIds = [...existingResourceIds, ...insertResources(stored, user.id)]; linkRewardResources(id, resourceIds); } db.exec('COMMIT'); oldIds.forEach(deleteUnusedResource); applicationId = id;
+        } else {
+          const result = db.prepare(`INSERT INTO reward_applications (student_id,category_id,category_name,category_icon,content,detail,completed_at,requested_stars,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?)`).run(user.id, category.id, category.name, category.icon, content, detail, completedAt, requestedStars, timestamp, timestamp);
+          applicationId = Number(result.lastInsertRowid); linkRewardResources(applicationId, insertResources(stored, user.id)); db.exec('COMMIT');
+        }
+        const row = db.prepare(`SELECT reward_applications.*, users.display_name AS student_name, users.avatar AS student_avatar FROM reward_applications JOIN users ON users.id = reward_applications.student_id WHERE reward_applications.id = ?`).get(applicationId);
+        json(res, editing ? 200 : 201, { application: rewardApplicationJson(row, true) });
+      } catch (error) { db.exec('ROLLBACK'); await Promise.allSettled(stored.map(resource => deleteStoredUrl(resource.url, { dataDir }))); throw error; }
+      return;
+    }
+    if (req.method === 'DELETE' && /^\/api\/student\/reward-applications\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || user.role !== 'student') return; const id = Number(url.pathname.split('/').pop());
+      const row = db.prepare('SELECT * FROM reward_applications WHERE id = ? AND student_id = ?').get(id, user.id); if (!row) { bad(res, 404, '奖励申请不存在'); return; }
+      if (!['pending', 'rejected'].includes(row.status)) { bad(res, 409, '审核中的申请不可删除'); return; }
+      const ids = db.prepare('SELECT resource_id FROM reward_application_resources WHERE application_id = ?').all(id).map(item => item.resource_id); db.prepare('DELETE FROM reward_applications WHERE id = ?').run(id); ids.forEach(deleteUnusedResource); json(res, 204, {}); return;
+    }
     if (req.method === 'PATCH' && /^\/api\/student\/tasks\/\d+\/draft$/.test(url.pathname)) {
       const user = requireUser(req, res); if (!user) return; if (user.role !== 'student') { bad(res, 403, '学生账号专属接口'); return; }
       const taskId = Number(url.pathname.split('/')[4]);
@@ -860,6 +950,7 @@ const server = createServer(async (req, res) => {
       const studentId = Number(url.searchParams.get('studentId') || students[0]?.id);
       if (!students.some(student => student.id === studentId)) { bad(res, 403, '无权查看该学生'); return; }
       const pending = db.prepare(`SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.student_id = ? AND tasks.status = 'pending_review' AND tasks.is_demo = 0 ORDER BY tasks.submitted_at`).all(studentId).map(taskJson);
+      const rewardPendingCount = Number(db.prepare("SELECT COUNT(*) AS total FROM reward_applications WHERE status = 'pending' AND student_id = ?").get(studentId).total || 0);
       const currentDate = businessDate();
       const week = weekRange(currentDate);
       const todayTasks = db.prepare("SELECT status FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date = ?)) AND is_demo = 0").all(studentId, currentDate, currentDate, currentDate);
@@ -875,7 +966,7 @@ const server = createServer(async (req, res) => {
           weekCompleted: weekTasks.filter(task => task.status === 'completed').length,
           weekTotal: weekTasks.length,
           weekOverdue: weekTasks.filter(task => task.task_date < currentDate && ['not_started', 'in_progress', 'needs_more'].includes(task.status)).length,
-          pending: pending.length,
+          pending: pending.length + rewardPendingCount,
           todayCompleted: todayTasks.filter(task => task.status === 'completed').length,
           todayTotal: todayTasks.length,
           weekStars,
@@ -1000,6 +1091,34 @@ const server = createServer(async (req, res) => {
       const rows = db.prepare(`SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE ${conditions.join(' AND ')} ORDER BY users.display_name, tasks.submitted_at DESC`).all(...params);
       json(res, 200, { reviews: rows.map(task => taskJson(task)) });
       return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/parent/reward-applications') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const allowedIds = studentListFor(user).map(student => Number(student.id)); if (!allowedIds.length) { json(res, 200, { applications: [] }); return; }
+      const status = clean(url.searchParams.get('status'), 12) || 'pending'; const valid = ['pending', 'approved', 'rejected', 'all']; if (!valid.includes(status)) { bad(res, 400, '状态不正确'); return; }
+      const conditions = [`student_id IN (${allowedIds.map(() => '?').join(',')})`]; const params = [...allowedIds]; if (status !== 'all') { conditions.push('reward_applications.status = ?'); params.push(status); }
+      const rows = db.prepare(`SELECT reward_applications.*, users.display_name AS student_name, users.avatar AS student_avatar FROM reward_applications JOIN users ON users.id = reward_applications.student_id WHERE ${conditions.join(' AND ')} ORDER BY users.display_name, created_at DESC, id DESC`).all(...params);
+      json(res, 200, { applications: rows.map(row => rewardApplicationJson(row)) }); return;
+    }
+    if (req.method === 'GET' && /^\/api\/parent\/reward-applications\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop());
+      const row = db.prepare(`SELECT reward_applications.*, users.display_name AS student_name, users.avatar AS student_avatar FROM reward_applications JOIN users ON users.id = reward_applications.student_id WHERE reward_applications.id = ?`).get(id);
+      if (!row || !canManageStudent(user, row.student_id)) { bad(res, 404, '奖励申请不存在'); return; } json(res, 200, { application: rewardApplicationJson(row, true) }); return;
+    }
+    if (req.method === 'POST' && /^\/api\/parent\/reward-applications\/\d+\/review$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/')[4]);
+      const row = db.prepare('SELECT * FROM reward_applications WHERE id = ?').get(id); if (!row || !canManageStudent(user, row.student_id)) { bad(res, 404, '奖励申请不存在'); return; }
+      if (row.status !== 'pending') { bad(res, 409, '该申请已经审核'); return; }
+      const body = await readBody(req); const action = clean(body.action, 12); const message = clean(body.message, 300); const reviewedAt = now();
+      if (!['approve', 'reject'].includes(action)) { bad(res, 400, '审核操作不正确'); return; }
+      const stars = Number(body.stars); if (action === 'approve' && (!Number.isSafeInteger(stars) || stars < 0)) { bad(res, 400, '实际奖励星星数不正确'); return; }
+      db.exec('BEGIN'); try {
+        db.prepare('UPDATE reward_applications SET status=?, awarded_stars=?, parent_message=?, reviewed_by=?, reviewed_at=?, updated_at=? WHERE id=?').run(action === 'approve' ? 'approved' : 'rejected', action === 'approve' ? stars : null, message, user.id, reviewedAt, reviewedAt, id);
+        if (action === 'approve' && stars > 0) db.prepare('INSERT INTO rewards (student_id, task_id, stars, message, created_at) VALUES (?, NULL, ?, ?, ?)').run(row.student_id, stars, message || `奖励申请：${row.content}`, reviewedAt);
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      const updated = db.prepare(`SELECT reward_applications.*, users.display_name AS student_name, users.avatar AS student_avatar FROM reward_applications JOIN users ON users.id = reward_applications.student_id WHERE reward_applications.id = ?`).get(id);
+      json(res, 200, { application: rewardApplicationJson(updated, true) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/parent/statistics') {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;

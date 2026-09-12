@@ -51,6 +51,7 @@
       <aside class="sidebar student-sidebar" aria-label="学生端导航">
         <button class="nav-item active" data-page="today"><i data-lucide="clipboard-check"></i><b>我的任务</b></button>
         <button class="nav-item" data-page="tasks"><i data-lucide="list-todo"></i><b>任务列表</b></button>
+        <button class="nav-item" data-page="reward-applications"><i data-lucide="gift"></i><b>奖励申请</b></button>
         <button class="nav-item" data-page="growth"><i data-lucide="sparkles"></i><b>成长星球</b></button>
       </aside>
 
@@ -105,15 +106,20 @@
           </div>
           <section class="recent-rewards"><div class="section-title"><h2>最近收到的奖励</h2></div><div class="reward-timeline"><div class="reward-empty" role="status"><span class="reward-empty-icon"><i data-lucide="gift"></i></span><div><h3>暂时没有收到家长奖励</h3><p>完成任务并通过审核后，奖励会显示在这里。</p></div></div></div></section>
         </section>
+        <section class="page student-page" id="reward-applications">
+          <div class="page-heading"><div><p class="eyebrow">奖励中心</p><h1>奖励申请</h1></div><button class="primary-button" id="add-reward-application">＋ 新建申请</button></div>
+          <div class="tabs student-task-tabs reward-application-tabs"><button class="active" data-reward-application-filter="all">全部</button><button data-reward-application-filter="pending">待审核</button><button data-reward-application-filter="approved">已通过</button><button data-reward-application-filter="rejected">已驳回</button></div>
+          <div class="student-task-list" id="reward-application-list"></div>
+        </section>
 
         <section class="page parent-page" id="overview">
           <div class="page-heading"><div><p class="eyebrow" id="overview-date"></p><h1 id="overview-greeting">家长首页</h1></div></div>
           <div class="overview-student-row"><div class="child-switch"><span class="avatar">学</span><div><b>暂无学生</b><small></small></div><label><span>查看学生</span><select id="dashboard-student-select" aria-label="切换学生"></select></label></div><section class="child-growth"><div class="section-title"><h2 id="parent-growth-title">学生成长</h2></div><div class="growth-inline"><div class="growth-rewards" id="parent-growth-rewards"><span class="growth-reward"><i>⭐</i><strong>0</strong></span></div><p id="parent-growth-next">再收集 100 颗星星，得到新月亮</p><div class="progress-track"><span style="width:0"></span></div></div></section></div>
           <div class="metric-grid">
-            <div class="metric-card week-complete-card"><span><i data-lucide="circle-check-big"></i></span><small>本周完成</small><strong>--</strong><p>本周暂无任务</p></div>
+            <button class="metric-card week-complete-card" data-overview-task-link><span><i data-lucide="circle-check-big"></i></span><small>本周完成</small><strong>--</strong><p>本周暂无任务</p></button>
             <div class="metric-card week-overdue-card"><span><i data-lucide="clock-alert"></i></span><small>本周逾期提醒</small><strong>0</strong><p>任务均在计划内</p></div>
             <button class="metric-card review-card" data-parent-page="review"><span><i data-lucide="clipboard-check"></i></span><small>待审核</small><strong>0</strong><p>暂时无需处理</p></button>
-            <div class="metric-card today-complete-card"><span><i data-lucide="calendar-check"></i></span><small>今日完成</small><strong>--</strong><p>今日暂无任务</p></div>
+            <button class="metric-card today-complete-card" data-overview-task-link><span><i data-lucide="calendar-check"></i></span><small>今日完成</small><strong>--</strong><p>今日暂无任务</p></button>
             <div class="metric-card week-star-card"><span><i data-lucide="star"></i></span><small>本周星星</small><strong>0</strong><p>完成任务后获得</p></div>
           </div>
           <section class="overview-review-section"><div class="section-title"><h2>待审核任务</h2><button class="text-button" data-parent-page="review">进入审核中心</button></div><div class="review-list" id="compact-review-list"></div></section>
@@ -165,7 +171,7 @@
         <section class="page parent-page admin-only" id="categories"><div class="page-heading"><div><p class="eyebrow">任务设置</p><h1>任务分类</h1></div><button class="primary-button" id="add-category">＋ 新增分类</button></div><div class="category-list" id="category-list"></div></section>
 
         <section class="page parent-page" id="review">
-          <div class="page-heading"><div><p class="eyebrow">审核中心</p><h1>待审核任务</h1></div><span class="page-count" id="review-count">0 项待审核</span></div>
+          <div class="page-heading"><div><p class="eyebrow">审核中心</p><h1>待审核事项</h1></div><span class="page-count" id="review-count">0 项待审核</span></div>
           <div class="review-groups" id="review-list"></div>
         </section>
 
@@ -178,11 +184,14 @@
       </main>
     </div>
 
-    <nav class="bottom-nav" aria-label="学生端移动导航"><button class="active" data-page="today"><i data-lucide="clipboard-check"></i><span>我的任务</span></button><button data-page="tasks"><i data-lucide="list-todo"></i><span>任务列表</span></button><button data-page="growth"><i data-lucide="sparkles"></i><span>成长星球</span></button></nav>
+    <nav class="bottom-nav" aria-label="学生端移动导航"><button class="active" data-page="today"><i data-lucide="clipboard-check"></i><span>我的任务</span></button><button data-page="tasks"><i data-lucide="list-todo"></i><span>任务列表</span></button><button data-page="reward-applications"><i data-lucide="gift"></i><span>奖励申请</span></button><button data-page="growth"><i data-lucide="sparkles"></i><span>成长星球</span></button></nav>
 
     <dialog id="task-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="task-modal-content"></div></dialog>
     <dialog id="task-detail-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="task-detail-modal-content"></div></dialog>
     <dialog id="review-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="review-modal-content"></div></dialog>
+    <dialog id="reward-application-dialog" class="input-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">奖励中心</p><h2 id="reward-application-title">新建奖励申请</h2><form id="reward-application-form" class="dialog-form"><input id="reward-application-id" type="hidden" /><label>完成分类<span>必填</span><select id="reward-application-category" required></select></label><label>完成内容<span>必填</span><input id="reward-application-content" required maxlength="160" placeholder="例如：完成一篇读书笔记" /></label><label class="reward-detail-field">说明<span>选填</span><textarea id="reward-application-detail" maxlength="600" placeholder="补充说明完成过程"></textarea></label><div class="form-row"><label>完成时间<span>必填</span><input id="reward-application-date" type="date" required /></label><label>希望获得的星星<span>必填</span><input id="reward-application-stars" type="number" min="1" step="1" required value="1" /></label></div><div class="reward-application-resource file-drop-zone" data-file-drop-target="reward-application-files"><input id="reward-application-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif" multiple hidden /><div><b>完成图片</b><span>拖拽图片到这里，最多 5 张，单张不超过 6 MB</span></div><button type="button" class="secondary-button" id="pick-reward-application-files"><i data-lucide="paperclip"></i>选择图片</button><div id="reward-application-file-list" hidden></div></div><p id="reward-application-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button class="primary-button" type="submit">提交申请</button></div></form></div></dialog>
+    <dialog id="reward-application-detail-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="reward-application-detail-content"></div></dialog>
+    <dialog id="reward-review-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="reward-review-content"></div></dialog>
     <dialog id="feedback-preview-dialog" class="media-preview-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="media-preview-content" id="feedback-preview-content"></div></dialog>
     <dialog id="password-dialog"><div class="modal-content"><p class="eyebrow">账号安全</p><h2>请修改初始密码</h2><p>管理员首次登录后需要设置新的安全密码。</p><form id="password-form" class="password-form"><label>当前密码<input id="current-password" type="password" autocomplete="current-password" required /></label><label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="10" required placeholder="至少 10 位，包含字母和数字" /></label><p id="password-error" class="login-error"></p><button class="primary-button" type="submit">保存新密码</button></form></div></dialog>
     <dialog id="account-security-dialog" class="input-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">账号安全</p><h2>修改密码</h2><form id="account-password-form" class="dialog-form" autocomplete="off"><label>当前密码<input id="account-current-password" type="password" autocomplete="current-password" required /></label><label>新密码<input id="account-new-password" type="password" autocomplete="new-password" minlength="10" required placeholder="至少 10 位，包含字母和数字" /></label><p id="account-password-error" class="login-error"></p><div class="modal-actions"><button class="primary-button" type="submit">修改密码</button></div></form></div></dialog>
@@ -206,6 +215,6 @@
     <div class="global-loader" id="global-loader" role="status" aria-live="polite" hidden><div class="loader-orbit"><span class="loader-star">★</span><i></i><i></i><i></i></div><p>正在准备，请稍候…</p></div>
     <div class="toast" id="toast" role="status"></div>
     <script src="assets/vendor/lucide.min.js?v=1.42.0"></script>
-    <script src="app.js?v=20260911-account-menu8"></script>
+    <script src="app.js?v=20260912-reward-edit-attachments1"></script>
   </body>
 </html>
