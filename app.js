@@ -20,6 +20,8 @@ let activeRequests = 0;
 let loaderTimer = null;
 let recoveryEmailTimer = null;
 let recoveryEmailCooldownUntil = 0;
+let passwordRecoveryTimer = null;
+let passwordRecoveryCooldownUntil = 0;
 function renderRecoveryEmailTimer() {
   const button = $('#send-recovery-email');
   if (!button) return;
@@ -46,8 +48,47 @@ function startRecoveryEmailTimer() {
   renderRecoveryEmailTimer();
   recoveryEmailTimer = setInterval(() => { renderRecoveryEmailTimer(); if (!recoveryEmailCooldownUntil) { clearInterval(recoveryEmailTimer); recoveryEmailTimer = null; } }, 1000);
 }
-function enhancePasswordInputs() {
-  $$('input[type="password"]').forEach(input => {
+function renderPasswordRecoveryTimer() {
+  const button = $('#send-recovery-code');
+  if (!button) return;
+  const remaining = Math.ceil((passwordRecoveryCooldownUntil - Date.now()) / 1000);
+  if (remaining > 0) { button.disabled = true; button.textContent = `重新发送（${remaining}s）`; return; }
+  passwordRecoveryCooldownUntil = 0;
+  button.disabled = false;
+  button.textContent = '发送验证码';
+}
+function clearPasswordRecoveryTimer() {
+  if (passwordRecoveryTimer) { clearInterval(passwordRecoveryTimer); passwordRecoveryTimer = null; }
+  passwordRecoveryCooldownUntil = 0;
+  renderPasswordRecoveryTimer();
+}
+function restorePasswordRecoveryTimer() {
+  if (passwordRecoveryTimer) clearInterval(passwordRecoveryTimer);
+  passwordRecoveryTimer = null;
+  renderPasswordRecoveryTimer();
+  if (passwordRecoveryCooldownUntil > Date.now()) passwordRecoveryTimer = setInterval(() => {
+    renderPasswordRecoveryTimer();
+    if (!passwordRecoveryCooldownUntil) { clearInterval(passwordRecoveryTimer); passwordRecoveryTimer = null; }
+  }, 1000);
+}
+function startPasswordRecoveryTimer() {
+  if (passwordRecoveryTimer) clearInterval(passwordRecoveryTimer);
+  passwordRecoveryCooldownUntil = Date.now() + 60000;
+  restorePasswordRecoveryTimer();
+}
+function togglePasswordVisibility(button) {
+  const input = button.closest('.password-input-wrap')?.querySelector('input');
+  if (!input) return;
+  const visible = input.type === 'text';
+  input.type = visible ? 'password' : 'text';
+  button.innerHTML = icon(visible ? 'eye' : 'eye-off');
+  button.setAttribute('aria-label', visible ? '显示密码' : '隐藏密码');
+  button.setAttribute('aria-pressed', String(!visible));
+  button.title = visible ? '显示密码' : '隐藏密码';
+  refreshIcons();
+}
+function enhancePasswordInputs(root = document) {
+  $$('input[type="password"], input[data-password-toggle-ready]', root).forEach(input => {
     if (input.dataset.passwordToggleReady) return;
     input.dataset.passwordToggleReady = 'true';
     const wrapper = document.createElement('span');
@@ -59,8 +100,14 @@ function enhancePasswordInputs() {
     button.className = 'password-toggle';
     button.dataset.passwordToggle = 'true';
     button.setAttribute('aria-label', '显示密码');
+    button.setAttribute('aria-pressed', 'false');
     button.title = '显示密码';
     button.innerHTML = icon('eye');
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      togglePasswordVisibility(button);
+    });
     wrapper.appendChild(button);
   });
 }
@@ -71,6 +118,7 @@ function resetPasswordVisibility(root = document) {
     if (button) {
       button.innerHTML = icon('eye');
       button.setAttribute('aria-label', '显示密码');
+      button.setAttribute('aria-pressed', 'false');
       button.title = '显示密码';
     }
   });
@@ -266,6 +314,10 @@ function renderStudentWeek(data) {
   const labels = ['一', '二', '三', '四', '五', '六', '日'];
   const start = startOfWeek(state.studentDate);
   const incompleteDates = new Set(data.incompleteTaskDates || []);
+  const previousWeekUnfinishedCount = Number(data.previousWeekUnfinishedCount || 0);
+  const reminder = $('#student-week-incomplete-reminder');
+  reminder.hidden = previousWeekUnfinishedCount < 1;
+  reminder.textContent = previousWeekUnfinishedCount ? `上周还有 ${previousWeekUnfinishedCount} 个任务未完成` : '';
   $('#student-week').innerHTML = labels.map((label, index) => {
     const date = addDays(start, index);
     const hasUnfinished = incompleteDates.has(date);
@@ -996,15 +1048,8 @@ $('#login-form').addEventListener('submit', async event => {
 document.addEventListener('click', async event => {
   const passwordToggle = event.target.closest('[data-password-toggle]');
   if (passwordToggle) {
-    const input = passwordToggle.closest('.password-input-wrap')?.querySelector('input');
-    if (input) {
-      const visible = input.type === 'text';
-      input.type = visible ? 'password' : 'text';
-      passwordToggle.innerHTML = icon(visible ? 'eye' : 'eye-off');
-      passwordToggle.setAttribute('aria-label', visible ? '显示密码' : '隐藏密码');
-      passwordToggle.title = visible ? '显示密码' : '隐藏密码';
-      refreshIcons();
-    }
+    event.preventDefault();
+    togglePasswordVisibility(passwordToggle);
     return;
   }
   if (!event.target.closest('#account-menu') && !event.target.closest('#account-security-button')) $('#account-menu').hidden = true;
@@ -1013,7 +1058,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#parent-sidebar-backdrop')) { closeParentMobileMenu(); return; }
   const loginRole = event.target.closest('[data-login-role]'); if (loginRole) { setLoginRole(loginRole.dataset.loginRole); return; }
   if (event.target.closest('#refresh-captcha')) { await refreshCaptcha(); return; }
-  if (event.target.closest('#open-recovery')) { $('#recovery-form').reset(); $('#recovery-reset-fields').hidden = true; $('#recovery-error').textContent = ''; $('#recovery-dialog').showModal(); return; }
+  if (event.target.closest('#open-recovery')) { $('#recovery-form').reset(); $('#recovery-reset-fields').hidden = true; $('#recovery-error').textContent = ''; $('#recovery-error').classList.remove('success'); resetPasswordVisibility($('#recovery-dialog')); restorePasswordRecoveryTimer(); $('#recovery-dialog').showModal(); return; }
   if (event.target.closest('#account-security-button')) { const menu = $('#account-menu'); menu.hidden = !menu.hidden; refreshIcons(); return; }
   if (event.target.id === 'open-account-password') { $('#account-menu').hidden = true; $('#account-password-form').reset(); $('#account-password-error').textContent = ''; $('#account-security-dialog').showModal(); return; }
   if (event.target.id === 'open-account-email') { $('#account-menu').hidden = true; restoreRecoveryEmailTimer(); $('#recovery-email-form').reset(); $('#recovery-email-form').hidden = false; $('#recovery-email-code-wrap').hidden = true; $('#recovery-email-message').textContent = ''; try { const data = await api('/api/auth/recovery-email', { silent: true }); $('#bound-email-status').textContent = data.email ? `当前已绑定：${data.email}` : '尚未绑定找回邮箱'; } catch (err) { $('#bound-email-status').textContent = err.message; } $('#email-settings-dialog').showModal(); return; }
@@ -1251,34 +1296,84 @@ $('#category-form').addEventListener('submit', async event => {
   catch (err) { error.textContent = err.message; }
 });
 $('#password-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = event.currentTarget; const error = $('#password-error'); error.textContent = '';
-  try { await api('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: $('#current-password').value, newPassword: $('#new-password').value }) }); state.user.mustChangePassword = false; $('#password-dialog').close(); form.reset(); showToast('密码已更新'); }
+  event.preventDefault(); event.stopPropagation(); const form = event.currentTarget; const error = $('#password-error'); const button = $('button[type="submit"]', form); error.textContent = ''; button.disabled = true; button.textContent = '正在保存…';
+  try { await api('/api/auth/change-password', { method: 'POST', silent: true, body: JSON.stringify({ currentPassword: $('#current-password').value, newPassword: $('#new-password').value }) }); state.user.mustChangePassword = false; $('#password-dialog').close(); form.reset(); showToast('密码已更新'); }
   catch (err) { error.textContent = err.message; }
+  finally { button.disabled = false; button.textContent = '保存新密码'; }
 });
 $('#account-password-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = event.currentTarget; const error = $('#account-password-error'); error.textContent = '';
-  try { await api('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: $('#account-current-password').value, newPassword: $('#account-new-password').value }) }); form.reset(); $('#account-security-dialog').close(); showToast('密码已更新'); }
+  event.preventDefault(); event.stopPropagation(); const form = event.currentTarget; const error = $('#account-password-error'); const button = $('button[type="submit"]', form); error.textContent = ''; button.disabled = true; button.textContent = '正在修改…';
+  try { await api('/api/auth/change-password', { method: 'POST', silent: true, body: JSON.stringify({ currentPassword: $('#account-current-password').value, newPassword: $('#account-new-password').value }) }); form.reset(); $('#account-security-dialog').close(); showToast('密码已更新'); }
   catch (err) { error.textContent = err.message; }
+  finally { button.disabled = false; button.textContent = '修改密码'; }
 });
 $('#recovery-email-form').addEventListener('submit', async event => {
-  event.preventDefault(); const message = $('#recovery-email-message'); message.textContent = '';
-  try { await api('/api/auth/recovery-email/request', { method: 'POST', body: JSON.stringify({ email: $('#recovery-email').value }) }); $('#recovery-email-code-wrap').hidden = false; startRecoveryEmailTimer(); message.textContent = '验证码已发送，请检查邮箱。'; }
+  event.preventDefault(); event.stopPropagation(); const message = $('#recovery-email-message'); const button = $('#send-recovery-email'); if (button.disabled) return; message.textContent = ''; button.disabled = true; button.textContent = '正在发送…';
+  try { await api('/api/auth/recovery-email/request', { method: 'POST', silent: true, body: JSON.stringify({ email: $('#recovery-email').value }) }); $('#recovery-email-code-wrap').hidden = false; startRecoveryEmailTimer(); message.textContent = '验证码已发送，请检查邮箱。'; }
   catch (err) { message.textContent = err.message; }
+  finally { renderRecoveryEmailTimer(); }
 });
-$('#verify-recovery-email').addEventListener('click', async () => {
-  const message = $('#recovery-email-message'); message.textContent = '';
-  try { const email = $('#recovery-email').value; await api('/api/auth/recovery-email/verify', { method: 'POST', body: JSON.stringify({ email, code: $('#recovery-email-code').value }) }); clearRecoveryEmailTimer(); $('#bound-email-status').textContent = `当前已绑定：${email}`; $('#recovery-email-form').reset(); $('#recovery-email-form').hidden = true; message.textContent = '邮箱已验证并绑定。'; }
+$('#verify-recovery-email').addEventListener('click', async event => {
+  event.preventDefault(); event.stopPropagation(); const message = $('#recovery-email-message'); const button = event.currentTarget; message.textContent = ''; button.disabled = true; button.textContent = '正在验证…';
+  try { const email = $('#recovery-email').value; await api('/api/auth/recovery-email/verify', { method: 'POST', silent: true, body: JSON.stringify({ email, code: $('#recovery-email-code').value }) }); clearRecoveryEmailTimer(); $('#bound-email-status').textContent = `当前已绑定：${email}`; $('#recovery-email-form').reset(); $('#recovery-email-form').hidden = true; message.textContent = '邮箱已验证并绑定。'; }
   catch (err) { message.textContent = err.message; }
+  finally { button.disabled = false; button.textContent = '验证并保存邮箱'; }
 });
+function showRecoveryMessage(message, success = false) {
+  const error = $('#recovery-error');
+  error.textContent = message;
+  error.classList.toggle('success', success);
+}
+function validRecoveryEmail(value) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value); }
 $('#recovery-form').addEventListener('submit', async event => {
-  event.preventDefault(); const error = $('#recovery-error'); error.textContent = '';
-  try { await api('/api/auth/recovery/request', { method: 'POST', body: JSON.stringify({ username: $('#recovery-username').value, email: $('#recovery-request-email').value }) }); $('#recovery-reset-fields').hidden = false; error.textContent = '如果账号和邮箱匹配，验证码已发送，请检查邮箱。'; }
-  catch (err) { error.textContent = err.message; }
+  event.preventDefault();
+  const username = $('#recovery-username').value.trim();
+  const email = $('#recovery-request-email').value.trim().toLowerCase();
+  const button = $('#send-recovery-code');
+  showRecoveryMessage('');
+  if (!username) { showRecoveryMessage('请输入用户名。'); $('#recovery-username').focus(); return; }
+  if (!email) { showRecoveryMessage('请输入已验证邮箱。'); $('#recovery-request-email').focus(); return; }
+  if (!validRecoveryEmail(email)) { showRecoveryMessage('请输入有效的邮箱地址。'); $('#recovery-request-email').focus(); return; }
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = '正在发送…';
+  try {
+    const result = await api('/api/auth/recovery/request', { method: 'POST', body: JSON.stringify({ username, email }) });
+    $('#recovery-reset-fields').hidden = false;
+    startPasswordRecoveryTimer();
+    showRecoveryMessage(result.sent ? `验证码已发送至 ${result.maskedEmail}，5 分钟内有效。` : '如果账号和邮箱匹配，验证码将发送至已绑定邮箱，请检查邮箱。', true);
+    $('#recovery-code').focus();
+  } catch (err) {
+    showRecoveryMessage(err.message);
+    renderPasswordRecoveryTimer();
+  }
 });
 $('#reset-recovered-password').addEventListener('click', async () => {
-  const error = $('#recovery-error'); error.textContent = '';
-  try { await api('/api/auth/recovery/reset', { method: 'POST', body: JSON.stringify({ username: $('#recovery-username').value, email: $('#recovery-request-email').value, code: $('#recovery-code').value, newPassword: $('#recovery-new-password').value }) }); $('#recovery-dialog').close(); showToast('密码已重置，请使用新密码登录'); }
-  catch (err) { error.textContent = err.message; }
+  const username = $('#recovery-username').value.trim();
+  const email = $('#recovery-request-email').value.trim().toLowerCase();
+  const code = $('#recovery-code').value.trim();
+  const newPassword = $('#recovery-new-password').value;
+  const button = $('#reset-recovered-password');
+  showRecoveryMessage('');
+  if (!/^\d{6}$/.test(code)) { showRecoveryMessage('请输入 6 位邮箱验证码。'); $('#recovery-code').focus(); return; }
+  if (newPassword.length < 10 || !/[A-Za-z]/.test(newPassword) || !/\d/.test(newPassword)) { showRecoveryMessage('新密码至少 10 位，并包含字母和数字。'); $('#recovery-new-password').focus(); return; }
+  button.disabled = true;
+  button.textContent = '正在设置…';
+  try {
+    await api('/api/auth/recovery/reset', { method: 'POST', body: JSON.stringify({ username, email, code, newPassword }) });
+    clearPasswordRecoveryTimer();
+    $('#recovery-dialog').close();
+    $('#recovery-form').reset();
+    resetPasswordVisibility($('#recovery-dialog'));
+    $('#username').value = username;
+    $('#password').focus();
+    showToast('密码已重置，请使用新密码登录');
+  } catch (err) {
+    showRecoveryMessage(err.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = '设置新密码';
+  }
 });
 $('#student-avatar').addEventListener('change', async event => {
   const file = event.target.files[0];

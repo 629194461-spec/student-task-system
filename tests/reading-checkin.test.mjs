@@ -32,6 +32,16 @@ test('reading dashboard tracks monthly check-ins and enforces each book daily li
   assert.equal(secondBook.response.status, 201);
   assert.equal(thirdBook.response.status, 201);
   assert.equal(unusedBook.response.status, 201);
+  const otherParentCreate = await request('/api/admin/parents', { cookie: admin, method: 'POST', body: JSON.stringify({ displayName: '书架范围测试家长', username: `reading_parent_${suffix}`, password: 'Parent2026A' }) });
+  assert.equal(otherParentCreate.response.status, 201);
+  const otherParentLogin = await login(`reading_parent_${suffix}`, 'Parent2026A');
+  assert.equal(otherParentLogin.response.status, 200);
+  const otherBook = await request('/api/parent/reading/books', { cookie: otherParentLogin.cookie, method: 'POST', body: JSON.stringify({ title: `其他家长书籍${suffix}`, totalPages: 100 }) });
+  assert.equal(otherBook.response.status, 201);
+  const adminShelf = await request('/api/parent/reading/books', { cookie: admin });
+  assert.equal(adminShelf.body.books.some(book => book.id === otherBook.body.book.id), false);
+  const otherParentShelf = await request('/api/parent/reading/books', { cookie: otherParentLogin.cookie });
+  assert.deepEqual(otherParentShelf.body.books.map(book => book.id), [otherBook.body.book.id]);
   const updatedBook = await request(`/api/parent/reading/books/${unusedBook.body.book.id}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ title: `阅读测试书架已修改${suffix}`, totalPages: 30 }) });
   assert.equal(updatedBook.response.status, 200);
   assert.equal(updatedBook.body.book.title, `阅读测试书架已修改${suffix}`);
@@ -70,8 +80,8 @@ test('reading dashboard tracks monthly check-ins and enforces each book daily li
   const blocked = await request('/api/student/reading/checkins', { cookie: studentLogin.cookie, method: 'POST', body: JSON.stringify({ planId: firstPlan.body.plans[0].id, checkinDate: today, endPage: 4 }) });
   assert.equal(blocked.response.status, 409);
   assert.match(blocked.body.error, /待审核/);
-  const otherBook = await request('/api/student/reading/checkins', { cookie: studentLogin.cookie, method: 'POST', body: JSON.stringify({ planId: secondPlan.body.plans[0].id, checkinDate: today, endPage: 2 }) });
-  assert.equal(otherBook.response.status, 201, 'pending review for one book does not block another book');
+  const otherBookCheckin = await request('/api/student/reading/checkins', { cookie: studentLogin.cookie, method: 'POST', body: JSON.stringify({ planId: secondPlan.body.plans[0].id, checkinDate: today, endPage: 2 }) });
+  assert.equal(otherBookCheckin.response.status, 201, 'pending review for one book does not block another book');
   for (const endPage of [2, 4, 6]) {
     const result = await request('/api/student/reading/checkins', { cookie: studentLogin.cookie, method: 'POST', body: JSON.stringify({ planId: thirdPlan.body.plans[0].id, checkinDate: today, endPage }) });
     assert.equal(result.response.status, 201);

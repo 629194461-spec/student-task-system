@@ -326,7 +326,7 @@ function migrate() {
     );
     CREATE TABLE IF NOT EXISTS recovery_emails (
       user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-      email_cipher TEXT NOT NULL, email_hash TEXT NOT NULL UNIQUE,
+      email_cipher TEXT NOT NULL, email_hash TEXT NOT NULL,
       verified_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS recovery_codes (
@@ -463,6 +463,23 @@ function migrate() {
   `);
   const taskColumns = new Set(db.prepare('PRAGMA table_info(tasks)').all().map(column => column.name));
   const recoveryCodeColumns = new Set(db.prepare('PRAGMA table_info(recovery_codes)').all().map(column => column.name));
+  const recoveryEmailSchema = String(db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recovery_emails'").get()?.sql || '');
+  if (/email_hash\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i.test(recoveryEmailSchema)) {
+    db.exec(`
+      BEGIN;
+      CREATE TABLE recovery_emails_next (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        email_cipher TEXT NOT NULL, email_hash TEXT NOT NULL,
+        verified_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      INSERT INTO recovery_emails_next (user_id, email_cipher, email_hash, verified_at, created_at, updated_at)
+        SELECT user_id, email_cipher, email_hash, verified_at, created_at, updated_at FROM recovery_emails;
+      DROP TABLE recovery_emails;
+      ALTER TABLE recovery_emails_next RENAME TO recovery_emails;
+      COMMIT;
+    `);
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_recovery_emails_email_hash ON recovery_emails(email_hash)');
   if (!recoveryCodeColumns.has('target_hash')) db.exec("ALTER TABLE recovery_codes ADD COLUMN target_hash TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('feedback_kind')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_kind TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('feedback_data')) db.exec("ALTER TABLE tasks ADD COLUMN feedback_data TEXT NOT NULL DEFAULT ''");
@@ -851,7 +868,6 @@ const server = createServer(async (req, res) => {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { bad(res, 400, '请输入有效邮箱地址'); return; }
       const currentEmail = db.prepare('SELECT email_hash FROM recovery_emails WHERE user_id = ? AND verified_at IS NOT NULL').get(user.id);
       if (currentEmail?.email_hash === hashToken(email)) { bad(res, 409, '该邮箱已绑定，无需重复验证'); return; }
-      if (db.prepare('SELECT 1 FROM recovery_emails WHERE email_hash = ? AND user_id <> ?').get(hashToken(email), user.id)) { bad(res, 409, '该邮箱已绑定其他账号'); return; }
       if (recoveryCodeLimitReached(email)) { bad(res, 429, '该邮箱 1 小时内验证码发送次数已达上限，请联系管理员'); return; }
       const code = String(randomInt(100000, 1000000));
       db.prepare("DELETE FROM recovery_codes WHERE user_id = ? AND purpose = 'bind_email'").run(user.id);
@@ -873,15 +889,18 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/auth/recovery/request') {
       const body = await readBody(req); const username = clean(body.username, 48); const email = clean(body.email, 160).toLowerCase();
+      if (!username) { bad(res, 400, '请输入用户名'); return; }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { bad(res, 400, '请输入有效邮箱地址'); return; }
       const user = db.prepare("SELECT users.id, users.role FROM users JOIN recovery_emails ON recovery_emails.user_id = users.id WHERE users.username = ? AND users.active = 1 AND users.role IN ('parent','admin') AND recovery_emails.email_hash = ?").get(username, hashToken(email));
       if (user) {
         if (recoveryCodeLimitReached(email)) { bad(res, 429, '该邮箱 1 小时内验证码发送次数已达上限，请联系管理员'); return; }
         const code = String(randomInt(100000, 1000000));
+        try { await sendRecoveryCode(email, code); } catch (error) { console.error('找回密码验证码发送失败：', error.message); bad(res, 503, '验证码暂时无法发送，请稍后重试或联系管理员'); return; }
         db.prepare("DELETE FROM recovery_codes WHERE user_id = ? AND purpose = 'reset_password'").run(user.id);
         db.prepare('INSERT INTO recovery_codes (user_id,purpose,code_hash,expires_at,request_ip,target_hash,created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(user.id, 'reset_password', hashToken(code), new Date(unix() + RECOVERY_CODE_TTL_MS).toISOString(), ip, hashToken(email), now());
-        try { await sendRecoveryCode(email, code); } catch { /* Keep the response generic. */ }
+        json(res, 200, { ok: true, sent: true, maskedEmail: maskedEmail(email), message: '验证码已发送，请检查邮箱。' }); return;
       }
-      json(res, 200, { ok: true, message: '如果账号和邮箱匹配，验证码已发送，请检查邮箱。' }); return;
+      bad(res, 400, '账号和已绑定邮箱不匹配，请检查后重试'); return;
     }
     if (req.method === 'POST' && url.pathname === '/api/auth/recovery/reset') {
       const body = await readBody(req); const username = clean(body.username, 48); const email = clean(body.email, 160).toLowerCase(); const code = clean(body.code, 12); const newPassword = typeof body.newPassword === 'string' ? body.newPassword : '';
@@ -946,9 +965,18 @@ const server = createServer(async (req, res) => {
       const tasks = weekTasks[date] || [];
       const taskDates = Object.entries(weekTasks).filter(([, dayTasks]) => dayTasks.length).map(([day]) => day);
       const incompleteTaskDates = overdueUnfinishedTaskDates(weekTasks);
+      const previousWeekDate = new Date(`${week.start}T12:00:00Z`); previousWeekDate.setUTCDate(previousWeekDate.getUTCDate() - 7);
+      const previousWeek = weekRange(previousWeekDate.toISOString().slice(0, 10));
+      const previousWeekRows = db.prepare(`SELECT tasks.* FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0`).all(user.id, previousWeek.end, previousWeek.start, previousWeek.start, previousWeek.end);
+      const previousWeekUnfinishedCount = previousWeekRows.filter(task => {
+        if (!['not_started', 'in_progress', 'needs_more'].includes(task.status)) return false;
+        return task.schedule_type === 'range'
+          ? task.available_end_date >= previousWeek.start && task.available_end_date <= previousWeek.end && task.available_end_date < businessDate()
+          : task.task_date < businessDate();
+      }).length;
       const rewards = db.prepare('SELECT rewards.*, tasks.title FROM rewards LEFT JOIN tasks ON tasks.id = rewards.task_id WHERE rewards.student_id = ? AND (rewards.task_id IS NULL OR tasks.is_demo = 0) ORDER BY rewards.id DESC LIMIT 10').all(user.id);
       const totalStars = db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(user.id).total;
-      json(res, 200, { date, student: publicUser(user), tasks, taskDates, incompleteTaskDates, weekTasks, rewards, growth: rewardBreakdown(totalStars) });
+      json(res, 200, { date, student: publicUser(user), tasks, taskDates, incompleteTaskDates, previousWeekUnfinishedCount, weekTasks, rewards, growth: rewardBreakdown(totalStars) });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/student/tasks') {
@@ -1235,9 +1263,7 @@ const server = createServer(async (req, res) => {
       const fields = `reading_books.*, users.display_name AS creator_name,
         (SELECT COUNT(*) FROM reading_plans WHERE reading_plans.book_id = reading_books.id) AS plan_count,
         (SELECT COUNT(*) FROM reading_plans WHERE reading_plans.book_id = reading_books.id AND reading_plans.status IN ('active','paused','awaiting_confirmation')) AS active_plan_count`;
-      const rows = user.role === 'admin'
-        ? db.prepare(`SELECT ${fields} FROM reading_books JOIN users ON users.id = reading_books.creator_id ORDER BY reading_books.updated_at DESC, reading_books.id DESC`).all()
-        : db.prepare(`SELECT ${fields} FROM reading_books JOIN users ON users.id = reading_books.creator_id WHERE reading_books.creator_id = ? ORDER BY reading_books.updated_at DESC, reading_books.id DESC`).all(user.id);
+      const rows = db.prepare(`SELECT ${fields} FROM reading_books JOIN users ON users.id = reading_books.creator_id WHERE reading_books.creator_id = ? ORDER BY reading_books.updated_at DESC, reading_books.id DESC`).all(user.id);
       json(res, 200, { books: rows.map(readingBookJson) }); return;
     }
     if (req.method === 'POST' && url.pathname === '/api/parent/reading/books') {
@@ -1255,7 +1281,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'PATCH' && /^\/api\/parent\/reading\/books\/\d+$/.test(url.pathname)) {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop());
       const book = db.prepare('SELECT * FROM reading_books WHERE id = ?').get(id);
-      if (!book || (user.role !== 'admin' && Number(book.creator_id) !== Number(user.id))) { bad(res, 404, '书籍不存在或无权修改'); return; }
+      if (!book || Number(book.creator_id) !== Number(user.id)) { bad(res, 404, '书籍不存在或无权修改'); return; }
       const body = await readBody(req, 6 * 1024 * 1024); const title = clean(body.title, 100); const author = clean(body.author, 80);
       const totalPages = Number(body.totalPages); const publisher = clean(body.publisher, 100); const isbn = clean(body.isbn, 32);
       if (!title || !Number.isSafeInteger(totalPages) || totalPages < 1 || totalPages > 100000) { bad(res, 400, '请填写书名和有效的总页数'); return; }
@@ -1278,7 +1304,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'DELETE' && /^\/api\/parent\/reading\/books\/\d+$/.test(url.pathname)) {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop());
       const book = db.prepare('SELECT * FROM reading_books WHERE id = ?').get(id);
-      if (!book || (user.role !== 'admin' && Number(book.creator_id) !== Number(user.id))) { bad(res, 404, '书籍不存在或无权删除'); return; }
+      if (!book || Number(book.creator_id) !== Number(user.id)) { bad(res, 404, '书籍不存在或无权删除'); return; }
       const planCount = Number(db.prepare('SELECT COUNT(*) AS total FROM reading_plans WHERE book_id = ?').get(id).total || 0);
       if (planCount) { bad(res, 409, '该书籍已有阅读计划或历史记录，不能删除'); return; }
       db.prepare('DELETE FROM reading_books WHERE id = ?').run(id);
@@ -1303,7 +1329,7 @@ const server = createServer(async (req, res) => {
       const stars = Number(body.stars); const feedbackType = clean(body.feedbackType, 32) || 'optional_photo_or_video'; const studentIds = [...new Set((Array.isArray(body.studentIds) ? body.studentIds : [body.studentId]).map(Number).filter(Number.isSafeInteger))];
       const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value) && dateRange(value, value).length === 1;
       if (!Number.isSafeInteger(bookId) || !studentIds.length || !validDate(startDate) || (endDate && (!validDate(endDate) || endDate < startDate)) || !Number.isSafeInteger(startPage) || startPage < 1 || !['daily', 'weekly'].includes(frequency) || (frequency === 'weekly' && !weekdays.length) || (!Number.isSafeInteger(targetPages) && !Number.isSafeInteger(targetMinutes)) || (targetPages < 1 && targetMinutes < 1) || !Number.isSafeInteger(stars) || stars < 0 || !['none', 'photo', 'video', 'photo_or_video', 'optional_photo_or_video'].includes(feedbackType)) { bad(res, 400, '请完整填写阅读计划信息'); return; }
-      const book = db.prepare('SELECT * FROM reading_books WHERE id = ?').get(bookId); if (!book || (user.role !== 'admin' && book.creator_id !== user.id)) { bad(res, 404, '书籍不存在或无权使用'); return; }
+      const book = db.prepare('SELECT * FROM reading_books WHERE id = ?').get(bookId); if (!book || Number(book.creator_id) !== Number(user.id)) { bad(res, 404, '书籍不存在或无权使用'); return; }
       if (startPage > book.total_pages) { bad(res, 400, '起始页不能超过书籍总页数'); return; }
       if (studentIds.some(studentId => !canManageStudent(user, studentId))) { bad(res, 403, '只能给已关联学生创建阅读计划'); return; }
       const overlap = db.prepare("SELECT 1 FROM reading_plans WHERE book_id = ? AND student_id = ? AND status IN ('active','paused','awaiting_confirmation') LIMIT 1");

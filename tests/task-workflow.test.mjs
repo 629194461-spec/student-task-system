@@ -57,8 +57,9 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   const draftTask = await assign(firstId, '草稿任务', currentDate, true, [parentFile]);
   const completedTask = await assign(firstId, '直接完成任务', currentDate, false);
   const futureTask = await assign(firstId, '未来任务', addDays(currentDate, 1));
+  const previousWeekTask = await assign(firstId, '上一周未完成提醒', addDays(currentDate, -7));
   const otherTask = await assign(secondId, '另一学生任务', currentDate);
-  for (const result of [draftTask, completedTask, futureTask, otherTask]) assert.equal(result.response.status, 201);
+  for (const result of [draftTask, completedTask, futureTask, previousWeekTask, otherTask]) assert.equal(result.response.status, 201);
 
   const firstLogin = await login(`task_a_${suffix}`, 'Student2026A', 'student');
   const secondLogin = await login(`task_b_${suffix}`, 'Student2026A', 'student');
@@ -69,6 +70,7 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal(Object.keys(studentWeek.body.weekTasks).length, 7);
   assert.ok(studentWeek.body.weekTasks[currentDate].some(task => task.title === '草稿任务'));
   assert.ok(studentWeek.body.weekTasks[addDays(currentDate, 1)].some(task => task.title === '未来任务'));
+  assert.equal(studentWeek.body.previousWeekUnfinishedCount, 1, 'student dashboard reports prior-week overdue work for the week navigation reminder');
   assert.ok(!studentWeek.body.incompleteTaskDates.includes(currentDate), 'today\'s unfinished tasks are not overdue reminders');
   assert.ok(!studentWeek.body.incompleteTaskDates.includes(addDays(currentDate, 1)), 'future tasks are not overdue reminders');
   const parentWeek = await request(`/api/parent/tasks?date=${currentDate}&studentId=${firstId}`, { cookie: admin });

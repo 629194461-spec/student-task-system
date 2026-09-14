@@ -16,6 +16,20 @@ async function login(username, password, role = 'parent', rememberMe = false) {
   return request('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password, role, captchaId: captcha.body.id, captcha: answer, rememberMe }) });
 }
 
+test('password recovery request validates input and reports account-email mismatches', async () => {
+  const missingUsername = await request('/api/auth/recovery/request', { method: 'POST', body: JSON.stringify({ username: '', email: 'parent@example.com' }) });
+  assert.equal(missingUsername.response.status, 400);
+  assert.equal(missingUsername.body.error, '请输入用户名');
+
+  const invalidEmail = await request('/api/auth/recovery/request', { method: 'POST', body: JSON.stringify({ username: 'parent', email: 'not-an-email' }) });
+  assert.equal(invalidEmail.response.status, 400);
+  assert.equal(invalidEmail.body.error, '请输入有效邮箱地址');
+
+  const unknown = await request('/api/auth/recovery/request', { method: 'POST', body: JSON.stringify({ username: `missing_${Date.now()}`, email: `missing_${Date.now()}@example.com` }) });
+  assert.equal(unknown.response.status, 400);
+  assert.equal(unknown.body.error, '账号和已绑定邮箱不匹配，请检查后重试');
+});
+
 test('admin manages parent accounts and parent-student visibility', async () => {
   const adminLogin = await login('admin', 'admin@2026', 'parent', true);
   assert.equal(adminLogin.response.status, 200);
