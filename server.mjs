@@ -412,6 +412,38 @@ function migrate() {
       resource_id INTEGER NOT NULL REFERENCES task_resources(id) ON DELETE CASCADE,
       sort_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(application_id, resource_id)
     );
+    CREATE TABLE IF NOT EXISTS reading_books (
+      id INTEGER PRIMARY KEY, creator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL, author TEXT NOT NULL DEFAULT '', cover_url TEXT NOT NULL DEFAULT '',
+      total_pages INTEGER NOT NULL, publisher TEXT NOT NULL DEFAULT '', isbn TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS reading_plans (
+      id INTEGER PRIMARY KEY, book_id INTEGER NOT NULL REFERENCES reading_books(id) ON DELETE CASCADE,
+      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      creator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      start_date TEXT NOT NULL, end_date TEXT NOT NULL DEFAULT '', start_page INTEGER NOT NULL DEFAULT 1,
+      target_pages INTEGER, target_minutes INTEGER, frequency TEXT NOT NULL DEFAULT 'daily',
+      weekdays TEXT NOT NULL DEFAULT '', needs_review INTEGER NOT NULL DEFAULT 1,
+      stars INTEGER NOT NULL DEFAULT 1, feedback_type TEXT NOT NULL DEFAULT 'optional_photo_or_video',
+      current_page INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','paused','awaiting_confirmation','completed','archived')),
+      completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL, completed_at TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS reading_checkins (
+      id INTEGER PRIMARY KEY, plan_id INTEGER NOT NULL REFERENCES reading_plans(id) ON DELETE CASCADE,
+      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      checkin_date TEXT NOT NULL, start_page INTEGER NOT NULL, end_page INTEGER NOT NULL,
+      pages_read INTEGER NOT NULL, reflection TEXT NOT NULL DEFAULT '',
+      feedback_kind TEXT NOT NULL DEFAULT '', feedback_url TEXT NOT NULL DEFAULT '', feedback_name TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending_review' CHECK(status IN ('pending_review','needs_more','completed')),
+      submitted_at TEXT, reviewed_at TEXT, reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      parent_message TEXT NOT NULL DEFAULT '', original_end_page INTEGER, adjusted_end_page INTEGER,
+      adjustment_reason TEXT NOT NULL DEFAULT '', awarded_stars INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      checkin_order INTEGER NOT NULL DEFAULT 1,
+      UNIQUE(plan_id, checkin_date, checkin_order)
+    );
     CREATE INDEX IF NOT EXISTS idx_tasks_student_date ON tasks(student_id, task_date);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_tasks_student_status_date ON tasks(student_id, status, task_date);
@@ -423,6 +455,11 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_task_templates_category_updated ON task_templates(category_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_task_resource_links_resource ON task_resource_links(resource_id);
     CREATE INDEX IF NOT EXISTS idx_template_resource_links_resource ON template_resource_links(resource_id);
+    CREATE INDEX IF NOT EXISTS idx_reading_books_creator ON reading_books(creator_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_reading_plans_student_status ON reading_plans(student_id, status, start_date);
+    CREATE INDEX IF NOT EXISTS idx_reading_plans_book_student ON reading_plans(book_id, student_id, status);
+    CREATE INDEX IF NOT EXISTS idx_reading_checkins_plan_date ON reading_checkins(plan_id, checkin_date);
+    CREATE INDEX IF NOT EXISTS idx_reading_checkins_student_status ON reading_checkins(student_id, status, checkin_date DESC);
   `);
   const taskColumns = new Set(db.prepare('PRAGMA table_info(tasks)').all().map(column => column.name));
   const recoveryCodeColumns = new Set(db.prepare('PRAGMA table_info(recovery_codes)').all().map(column => column.name));
@@ -445,6 +482,36 @@ function migrate() {
   if (!taskColumns.has('available_start_date')) db.exec("ALTER TABLE tasks ADD COLUMN available_start_date TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('available_end_date')) db.exec("ALTER TABLE tasks ADD COLUMN available_end_date TEXT NOT NULL DEFAULT ''");
   const resourceColumns = new Set(db.prepare('PRAGMA table_info(task_resources)').all().map(column => column.name));
+  const rewardColumns = new Set(db.prepare('PRAGMA table_info(rewards)').all().map(column => column.name));
+  if (!rewardColumns.has('reading_checkin_id')) db.exec('ALTER TABLE rewards ADD COLUMN reading_checkin_id INTEGER REFERENCES reading_checkins(id) ON DELETE SET NULL');
+  const readingCheckinColumns = new Set(db.prepare('PRAGMA table_info(reading_checkins)').all().map(column => column.name));
+  if (!readingCheckinColumns.has('awarded_stars')) db.exec('ALTER TABLE reading_checkins ADD COLUMN awarded_stars INTEGER');
+  if (!readingCheckinColumns.has('checkin_order')) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.exec(`
+        CREATE TABLE reading_checkins_next (
+          id INTEGER PRIMARY KEY, plan_id INTEGER NOT NULL REFERENCES reading_plans(id) ON DELETE CASCADE,
+          student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          checkin_date TEXT NOT NULL, start_page INTEGER NOT NULL, end_page INTEGER NOT NULL,
+          pages_read INTEGER NOT NULL, reflection TEXT NOT NULL DEFAULT '',
+          feedback_kind TEXT NOT NULL DEFAULT '', feedback_url TEXT NOT NULL DEFAULT '', feedback_name TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'pending_review' CHECK(status IN ('pending_review','needs_more','completed')),
+          submitted_at TEXT, reviewed_at TEXT, reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          parent_message TEXT NOT NULL DEFAULT '', original_end_page INTEGER, adjusted_end_page INTEGER,
+          adjustment_reason TEXT NOT NULL DEFAULT '', awarded_stars INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          checkin_order INTEGER NOT NULL DEFAULT 1,
+          UNIQUE(plan_id, checkin_date, checkin_order)
+        );
+        INSERT INTO reading_checkins_next (id,plan_id,student_id,checkin_date,start_page,end_page,pages_read,reflection,feedback_kind,feedback_url,feedback_name,status,submitted_at,reviewed_at,reviewed_by,parent_message,original_end_page,adjusted_end_page,adjustment_reason,awarded_stars,created_at,updated_at,checkin_order)
+          SELECT id,plan_id,student_id,checkin_date,start_page,end_page,pages_read,reflection,feedback_kind,feedback_url,feedback_name,status,submitted_at,reviewed_at,reviewed_by,parent_message,original_end_page,adjusted_end_page,adjustment_reason,awarded_stars,created_at,updated_at,1 FROM reading_checkins;
+        DROP TABLE reading_checkins;
+        ALTER TABLE reading_checkins_next RENAME TO reading_checkins;
+        CREATE INDEX IF NOT EXISTS idx_reading_checkins_plan_date ON reading_checkins(plan_id, checkin_date);
+        CREATE INDEX IF NOT EXISTS idx_reading_checkins_student_status ON reading_checkins(student_id, status, checkin_date DESC);
+      `);
+    } finally { db.exec('PRAGMA foreign_keys = ON'); }
+  }
   if (!resourceColumns.has('url')) db.exec("ALTER TABLE task_resources ADD COLUMN url TEXT NOT NULL DEFAULT ''");
   db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_series ON tasks(series_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_recovery_codes_target_created ON recovery_codes(target_hash, created_at)');
@@ -545,6 +612,13 @@ const taskResourceSummarySql = `
     (SELECT tr.mime FROM task_resources tr WHERE tr.id = tasks.resource_id), '') AS resource_mime,
   COALESCE((SELECT tr.kind FROM task_resource_links trl JOIN task_resources tr ON tr.id = trl.resource_id WHERE trl.task_id = tasks.id ORDER BY trl.sort_order, tr.id LIMIT 1),
     (SELECT tr.kind FROM task_resources tr WHERE tr.id = tasks.resource_id), '') AS resource_kind`;
+const taskStatusOrderSql = `CASE tasks.status
+  WHEN 'not_started' THEN 0
+  WHEN 'in_progress' THEN 0
+  WHEN 'needs_more' THEN 0
+  WHEN 'pending_review' THEN 1
+  WHEN 'completed' THEN 2
+  ELSE 3 END`;
 function taskJson(task, includeFeedback = false, includeResource = false) {
   const hasSummary = !includeResource && task.resource_count !== undefined;
   const resources = hasSummary
@@ -561,6 +635,15 @@ function taskJson(task, includeFeedback = false, includeResource = false) {
 }
 function taskVisibleOn(task, date) {
   return task.isDateRange ? task.availableStartDate <= date && task.availableEndDate >= date : task.date === date;
+}
+function overdueUnfinishedTaskDates(weekTasks, currentDate = businessDate()) {
+  return Object.entries(weekTasks).filter(([date, dayTasks]) => dayTasks.some(task => {
+    if (!['not_started', 'in_progress', 'needs_more'].includes(task.status)) return false;
+    // A continuous task is overdue only after its deadline, and its reminder belongs on that deadline.
+    if (task.isDateRange) return date === task.availableEndDate && task.availableEndDate < currentDate;
+    // Repeated tasks are separate daily records, so only elapsed occurrences are overdue.
+    return date < currentDate;
+  })).map(([date]) => date);
 }
 function taskTemplateJson(template, includeResource = false) {
   const resources = linkedResources('template', template.id, template.resource_id, includeResource);
@@ -589,6 +672,73 @@ function rewardApplicationJson(application, includeData = false) {
     awardedStars: application.awarded_stars, status: application.status, parentMessage: application.parent_message || '',
     reviewedAt: application.reviewed_at, createdAt: application.created_at, updatedAt: application.updated_at,
     resources, resourceCount: resources.length, hasResource: resources.length > 0 };
+}
+function readingBookJson(book) {
+  return { id: book.id, creatorId: book.creator_id, creatorName: book.creator_name || '', title: book.title,
+    author: book.author || '', coverUrl: signStoredUrl(book.cover_url || ''), totalPages: Number(book.total_pages),
+    publisher: book.publisher || '', isbn: book.isbn || '', planCount: Number(book.plan_count || 0),
+    activePlanCount: Number(book.active_plan_count || 0), canEdit: true,
+    canDelete: !Number(book.plan_count || 0), createdAt: book.created_at, updatedAt: book.updated_at };
+}
+function readingPlanJson(plan) {
+  return { id: plan.id, bookId: plan.book_id, studentId: plan.student_id, creatorId: plan.creator_id,
+    studentName: plan.student_name || '', studentAvatar: signStoredUrl(plan.student_avatar || ''),
+    title: plan.book_title, author: plan.book_author || '', coverUrl: signStoredUrl(plan.book_cover_url || ''),
+    totalPages: Number(plan.total_pages), startDate: plan.start_date, endDate: plan.end_date || '',
+    startPage: Number(plan.start_page), targetPages: Number(plan.target_pages || 0), targetMinutes: Number(plan.target_minutes || 0),
+    frequency: plan.frequency, weekdays: String(plan.weekdays || '').split(',').map(Number).filter(Number.isInteger),
+    needsReview: Boolean(plan.needs_review), stars: Number(plan.stars), feedbackType: plan.feedback_type,
+    currentPage: Number(plan.current_page || 0), status: plan.status, completedAt: plan.completed_at,
+    createdAt: plan.created_at, updatedAt: plan.updated_at };
+}
+function readingCheckinJson(checkin, includeFeedback = false) {
+  return { id: checkin.id, planId: checkin.plan_id, studentId: checkin.student_id, studentName: checkin.student_name || '',
+    studentAvatar: signStoredUrl(checkin.student_avatar || ''), bookTitle: checkin.book_title || '', bookAuthor: checkin.book_author || '',
+    bookCoverUrl: signStoredUrl(checkin.book_cover_url || ''), totalPages: Number(checkin.total_pages || 0),
+    checkinDate: checkin.checkin_date, startPage: Number(checkin.start_page), endPage: Number(checkin.end_page),
+    pagesRead: Number(checkin.pages_read), reflection: checkin.reflection || '', feedbackKind: checkin.feedback_kind || '',
+    feedbackName: checkin.feedback_name || '', status: checkin.status, submittedAt: checkin.submitted_at,
+    reviewedAt: checkin.reviewed_at, parentMessage: checkin.parent_message || '', originalEndPage: checkin.original_end_page,
+    adjustedEndPage: checkin.adjusted_end_page, adjustmentReason: checkin.adjustment_reason || '',
+    stars: Number(checkin.plan_stars || checkin.stars || 0), awardedStars: checkin.awarded_stars === null || checkin.awarded_stars === undefined ? null : Number(checkin.awarded_stars), needsReview: Boolean(checkin.needs_review),
+    createdAt: checkin.created_at, updatedAt: checkin.updated_at,
+    ...(includeFeedback ? { feedbackUrl: signStoredUrl(checkin.feedback_url || '') } : {}) };
+}
+const readingPlanSelectSql = `SELECT reading_plans.*, reading_books.title AS book_title, reading_books.author AS book_author,
+  reading_books.cover_url AS book_cover_url, reading_books.total_pages, users.display_name AS student_name, users.avatar AS student_avatar
+  FROM reading_plans JOIN reading_books ON reading_books.id = reading_plans.book_id
+  JOIN users ON users.id = reading_plans.student_id`;
+const readingCheckinSelectSql = `SELECT reading_checkins.*, reading_plans.stars AS plan_stars, reading_plans.needs_review,
+  reading_books.title AS book_title, reading_books.author AS book_author, reading_books.cover_url AS book_cover_url,
+  reading_books.total_pages, users.display_name AS student_name, users.avatar AS student_avatar
+  FROM reading_checkins JOIN reading_plans ON reading_plans.id = reading_checkins.plan_id
+  JOIN reading_books ON reading_books.id = reading_plans.book_id JOIN users ON users.id = reading_checkins.student_id`;
+function readingDueOn(plan, date) {
+  if (date < plan.start_date || (plan.end_date && date > plan.end_date)) return false;
+  if (plan.frequency === 'daily') return true;
+  const weekday = ((new Date(`${date}T12:00:00Z`).getUTCDay() + 6) % 7) + 1;
+  return String(plan.weekdays || '').split(',').map(Number).includes(weekday);
+}
+function approvedReadingEndPage(planId, beforeDate = '') {
+  const condition = beforeDate ? 'AND checkin_date < ?' : '';
+  const row = db.prepare(`SELECT MAX(end_page) AS page FROM reading_checkins WHERE plan_id = ? AND status = 'completed' ${condition}`).get(planId, ...(beforeDate ? [beforeDate] : []));
+  return Number(row?.page || 0);
+}
+async function readingCoverValue(value, current, title) {
+  if (!value) return { url: current || '', uploadedUrl: '' };
+  if (isStoredFileUrl(value) && stripUrlQuery(value) === current) return { url: current, uploadedUrl: '' };
+  const feedback = normalizeTaskFeedback(value);
+  if (!feedback || feedback.kind !== 'image') return null;
+  const url = await storeDataUrl(feedback.data, { dataDir, folder: 'reading-covers', name: title || '书籍封面' });
+  return { url, uploadedUrl: url };
+}
+async function readingFeedbackValue(value, current, name) {
+  if (!value) return { url: current || '', kind: '', uploadedUrl: '' };
+  if (isStoredFileUrl(value) && stripUrlQuery(value) === current) return { url: current, kind: '', uploadedUrl: '' };
+  const feedback = normalizeTaskFeedback(value);
+  if (!feedback) return null;
+  const url = await storeDataUrl(feedback.data, { dataDir, folder: 'reading-feedback', name: name || '阅读反馈' });
+  return { url, kind: feedback.kind, uploadedUrl: url };
 }
 const templateSelectSql = `SELECT task_templates.*, task_categories.name AS category_name,
   task_categories.icon AS category_icon, task_categories.color AS category_color,
@@ -791,13 +941,14 @@ const server = createServer(async (req, res) => {
       const date = clean(url.searchParams.get('date') || businessDate(), 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { bad(res, 400, '日期格式不正确'); return; }
       const week = weekRange(date);
-      const weekRows = db.prepare(`SELECT tasks.*, ${taskResourceSummarySql} FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0 ORDER BY task_date, created_at DESC, id DESC`).all(user.id, week.end, week.start, week.start, week.end).map(taskJson);
+      const weekRows = db.prepare(`SELECT tasks.*, ${taskResourceSummarySql} FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0 ORDER BY ${taskStatusOrderSql}, tasks.created_at DESC, tasks.id DESC`).all(user.id, week.end, week.start, week.start, week.end).map(taskJson);
       const weekTasks = Object.fromEntries(dateRange(week.start, week.end).map(day => [day, weekRows.filter(task => taskVisibleOn(task, day))]));
       const tasks = weekTasks[date] || [];
       const taskDates = Object.entries(weekTasks).filter(([, dayTasks]) => dayTasks.length).map(([day]) => day);
+      const incompleteTaskDates = overdueUnfinishedTaskDates(weekTasks);
       const rewards = db.prepare('SELECT rewards.*, tasks.title FROM rewards LEFT JOIN tasks ON tasks.id = rewards.task_id WHERE rewards.student_id = ? AND (rewards.task_id IS NULL OR tasks.is_demo = 0) ORDER BY rewards.id DESC LIMIT 10').all(user.id);
       const totalStars = db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(user.id).total;
-      json(res, 200, { date, student: publicUser(user), tasks, taskDates, weekTasks, rewards, growth: rewardBreakdown(totalStars) });
+      json(res, 200, { date, student: publicUser(user), tasks, taskDates, incompleteTaskDates, weekTasks, rewards, growth: rewardBreakdown(totalStars) });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/student/tasks') {
@@ -814,7 +965,7 @@ const server = createServer(async (req, res) => {
       };
       const selected = filters[filter];
       if (!selected) { bad(res, 400, '任务筛选条件不正确'); return; }
-      const order = 'created_at DESC, id DESC';
+      const order = `${taskStatusOrderSql}, tasks.created_at DESC, tasks.id DESC`;
       const tasks = db.prepare(`SELECT tasks.*, ${taskResourceSummarySql} FROM tasks WHERE student_id = ? AND is_demo = 0 AND ${selected.sql} ORDER BY ${order}`).all(user.id, ...selected.args).map(taskJson);
       json(res, 200, { filter, tasks });
       return;
@@ -891,7 +1042,8 @@ const server = createServer(async (req, res) => {
       const task = db.prepare('SELECT * FROM tasks WHERE id = ? AND student_id = ? AND is_demo = 0').get(taskId, user.id);
       if (!task) { bad(res, 404, '任务不存在'); return; }
       if (['completed', 'pending_review'].includes(task.status)) { bad(res, 409, task.status === 'completed' ? '任务已完成' : '任务正在等待审核'); return; }
-      if (task.schedule_type === 'range' && (businessDate() < task.available_start_date || businessDate() > task.available_end_date)) { bad(res, 409, '当前不在该任务的可完成日期范围内'); return; }
+      // A continuous-date task may be started ahead of its visible date range, but never after its deadline.
+      if (task.schedule_type === 'range' && businessDate() > task.available_end_date) { bad(res, 409, '该持续日期任务已超过结束日期，无法继续操作'); return; }
       const body = await readBody(req, 6 * 1024 * 1024);
       const rawFeedback = typeof body.feedbackData === 'string' ? body.feedbackData : task.feedback_url || task.feedback_data;
       const feedbackName = Object.hasOwn(body, 'feedbackName') ? clean(body.feedbackName, 120) : task.feedback_name;
@@ -915,12 +1067,13 @@ const server = createServer(async (req, res) => {
       const task = db.prepare('SELECT * FROM tasks WHERE id = ? AND student_id = ? AND is_demo = 0').get(taskId, user.id);
       if (!task) { bad(res, 404, '任务不存在'); return; }
       if (['completed', 'pending_review'].includes(task.status)) { bad(res, 409, task.status === 'completed' ? '任务已完成' : '任务正在等待审核'); return; }
-      if (task.schedule_type === 'range' && (businessDate() < task.available_start_date || businessDate() > task.available_end_date)) { bad(res, 409, '当前不在该任务的可完成日期范围内'); return; }
+      if (task.schedule_type === 'range' && businessDate() > task.available_end_date) { bad(res, 409, '该持续日期任务已超过结束日期，无法提交'); return; }
       const body = await readBody(req, 6 * 1024 * 1024);
       const feedbackName = clean(body.feedbackName, 120);
       const feedback = await feedbackValue(body.feedbackData, task, feedbackName);
       const feedbackNote = clean(body.feedbackNote, 300);
-      if (task.feedback_type !== 'none') {
+      if (body.feedbackData && !feedback) { bad(res, 400, '反馈文件格式不正确或超过 4 MB'); return; }
+      if (!['none', 'optional_photo_or_video'].includes(task.feedback_type)) {
         if (!feedback) { bad(res, 400, '请按任务要求上传学习反馈，文件最大 4 MB'); return; }
         if (task.feedback_type === 'photo' && feedback.kind !== 'image') { bad(res, 400, '该任务需要上传图片反馈'); return; }
         if (task.feedback_type === 'video' && feedback.kind !== 'video') { bad(res, 400, '该任务需要上传视频反馈'); return; }
@@ -944,19 +1097,23 @@ const server = createServer(async (req, res) => {
       if (!students.length) {
         const currentDate = businessDate();
         const week = weekRange(currentDate);
-        json(res, 200, { students: [], selectedStudentId: null, period: { today: currentDate, weekStart: week.start, weekEnd: week.end }, growth: rewardBreakdown(0), summary: { weekCompleted: 0, weekTotal: 0, weekOverdue: 0, pending: 0, todayCompleted: 0, todayTotal: 0, weekStars: 0, totalStars: 0 }, pending: [] });
+        json(res, 200, { students: [], selectedStudentId: null, period: { today: currentDate, weekStart: week.start, weekEnd: week.end }, growth: rewardBreakdown(0), summary: { weekCompleted: 0, weekTotal: 0, weekOverdue: 0, pending: 0, todayCompleted: 0, todayTotal: 0, weekStars: 0, totalStars: 0, readingActiveBookCount: 0, readingCompletedBookCount: 0, readingBookCount: 0 }, pending: [] });
         return;
       }
       const studentId = Number(url.searchParams.get('studentId') || students[0]?.id);
       if (!students.some(student => student.id === studentId)) { bad(res, 403, '无权查看该学生'); return; }
       const pending = db.prepare(`SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.student_id = ? AND tasks.status = 'pending_review' AND tasks.is_demo = 0 ORDER BY tasks.submitted_at`).all(studentId).map(taskJson);
       const rewardPendingCount = Number(db.prepare("SELECT COUNT(*) AS total FROM reward_applications WHERE status = 'pending' AND student_id = ?").get(studentId).total || 0);
+      const readingPendingCount = Number(db.prepare("SELECT COUNT(*) AS total FROM reading_checkins WHERE status = 'pending_review' AND student_id = ?").get(studentId).total || 0);
       const currentDate = businessDate();
       const week = weekRange(currentDate);
       const todayTasks = db.prepare("SELECT status FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date = ?)) AND is_demo = 0").all(studentId, currentDate, currentDate, currentDate);
       const weekTasks = db.prepare("SELECT status, task_date FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0").all(studentId, week.end, week.start, week.start, week.end);
       const weekStars = Number(db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND substr(created_at, 1, 10) BETWEEN ? AND ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(studentId, week.start, week.end).total);
       const totalStars = Number(db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(studentId).total);
+      const readingActiveBookCount = Number(db.prepare("SELECT COUNT(DISTINCT book_id) AS total FROM reading_plans WHERE student_id = ? AND status IN ('active','paused','awaiting_confirmation')").get(studentId).total || 0);
+      const readingCompletedBookCount = Number(db.prepare("SELECT COUNT(DISTINCT book_id) AS total FROM reading_plans WHERE student_id = ? AND status = 'completed'").get(studentId).total || 0);
+      const readingBookCount = Number(db.prepare("SELECT COUNT(DISTINCT book_id) AS total FROM reading_plans WHERE student_id = ? AND status IN ('active','paused','awaiting_confirmation','completed')").get(studentId).total || 0);
       json(res, 200, {
         students: students.map(student => ({ ...student, avatar: signStoredUrl(student.avatar) })),
         selectedStudentId: studentId,
@@ -966,11 +1123,15 @@ const server = createServer(async (req, res) => {
           weekCompleted: weekTasks.filter(task => task.status === 'completed').length,
           weekTotal: weekTasks.length,
           weekOverdue: weekTasks.filter(task => task.task_date < currentDate && ['not_started', 'in_progress', 'needs_more'].includes(task.status)).length,
-          pending: pending.length + rewardPendingCount,
+          pending: pending.length + rewardPendingCount + readingPendingCount,
+          readingPending: readingPendingCount,
           todayCompleted: todayTasks.filter(task => task.status === 'completed').length,
           todayTotal: todayTasks.length,
           weekStars,
-          totalStars
+          totalStars,
+          readingActiveBookCount,
+          readingCompletedBookCount,
+          readingBookCount
         },
         pending
       });
@@ -1069,6 +1230,201 @@ const server = createServer(async (req, res) => {
       json(res, 204, {});
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/parent/reading/books') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const fields = `reading_books.*, users.display_name AS creator_name,
+        (SELECT COUNT(*) FROM reading_plans WHERE reading_plans.book_id = reading_books.id) AS plan_count,
+        (SELECT COUNT(*) FROM reading_plans WHERE reading_plans.book_id = reading_books.id AND reading_plans.status IN ('active','paused','awaiting_confirmation')) AS active_plan_count`;
+      const rows = user.role === 'admin'
+        ? db.prepare(`SELECT ${fields} FROM reading_books JOIN users ON users.id = reading_books.creator_id ORDER BY reading_books.updated_at DESC, reading_books.id DESC`).all()
+        : db.prepare(`SELECT ${fields} FROM reading_books JOIN users ON users.id = reading_books.creator_id WHERE reading_books.creator_id = ? ORDER BY reading_books.updated_at DESC, reading_books.id DESC`).all(user.id);
+      json(res, 200, { books: rows.map(readingBookJson) }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/parent/reading/books') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const body = await readBody(req, 6 * 1024 * 1024); const title = clean(body.title, 100); const author = clean(body.author, 80);
+      const totalPages = Number(body.totalPages); const publisher = clean(body.publisher, 100); const isbn = clean(body.isbn, 32);
+      if (title.length < 1 || !Number.isSafeInteger(totalPages) || totalPages < 1 || totalPages > 100000) { bad(res, 400, '请填写书名和有效的总页数'); return; }
+      const cover = await readingCoverValue(body.coverData, '', title); if (!cover) { bad(res, 400, '封面仅支持 JPG、PNG 或 WebP 图片'); return; }
+      const createdAt = now(); let result;
+      try { result = db.prepare('INSERT INTO reading_books (creator_id, title, author, cover_url, total_pages, publisher, isbn, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(user.id, title, author, cover.url, totalPages, publisher, isbn, createdAt, createdAt); }
+      catch (error) { if (cover.uploadedUrl) await deleteStoredUrl(cover.uploadedUrl, { dataDir }).catch(() => {}); throw error; }
+      const book = db.prepare(`SELECT reading_books.*, users.display_name AS creator_name FROM reading_books JOIN users ON users.id = reading_books.creator_id WHERE reading_books.id = ?`).get(result.lastInsertRowid);
+      json(res, 201, { book: readingBookJson(book) }); return;
+    }
+    if (req.method === 'PATCH' && /^\/api\/parent\/reading\/books\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop());
+      const book = db.prepare('SELECT * FROM reading_books WHERE id = ?').get(id);
+      if (!book || (user.role !== 'admin' && Number(book.creator_id) !== Number(user.id))) { bad(res, 404, '书籍不存在或无权修改'); return; }
+      const body = await readBody(req, 6 * 1024 * 1024); const title = clean(body.title, 100); const author = clean(body.author, 80);
+      const totalPages = Number(body.totalPages); const publisher = clean(body.publisher, 100); const isbn = clean(body.isbn, 32);
+      if (!title || !Number.isSafeInteger(totalPages) || totalPages < 1 || totalPages > 100000) { bad(res, 400, '请填写书名和有效的总页数'); return; }
+      const pageBounds = db.prepare(`SELECT MAX(reading_plans.start_page) AS start_page, MAX(reading_plans.current_page) AS current_page,
+        MAX(reading_checkins.end_page) AS checked_page
+        FROM reading_plans LEFT JOIN reading_checkins ON reading_checkins.plan_id = reading_plans.id
+        WHERE reading_plans.book_id = ?`).get(id);
+      const minimumPages = Math.max(Number(pageBounds?.start_page || 0), Number(pageBounds?.current_page || 0), Number(pageBounds?.checked_page || 0));
+      if (totalPages < minimumPages) { bad(res, 409, `总页数不能小于已有阅读进度（第 ${minimumPages} 页）`); return; }
+      const cover = await readingCoverValue(body.coverData, book.cover_url, title); if (!cover) { bad(res, 400, '封面仅支持 JPG、PNG 或 WebP 图片'); return; }
+      try { db.prepare('UPDATE reading_books SET title=?, author=?, cover_url=?, total_pages=?, publisher=?, isbn=?, updated_at=? WHERE id=?').run(title, author, cover.url, totalPages, publisher, isbn, now(), id); }
+      catch (error) { if (cover.uploadedUrl) await deleteStoredUrl(cover.uploadedUrl, { dataDir }).catch(() => {}); throw error; }
+      if (cover.url !== book.cover_url && book.cover_url) await deleteStoredUrl(book.cover_url, { dataDir }).catch(() => {});
+      const updated = db.prepare(`SELECT reading_books.*, users.display_name AS creator_name,
+        (SELECT COUNT(*) FROM reading_plans WHERE reading_plans.book_id = reading_books.id) AS plan_count,
+        (SELECT COUNT(*) FROM reading_plans WHERE reading_plans.book_id = reading_books.id AND reading_plans.status IN ('active','paused','awaiting_confirmation')) AS active_plan_count
+        FROM reading_books JOIN users ON users.id = reading_books.creator_id WHERE reading_books.id = ?`).get(id);
+      json(res, 200, { book: readingBookJson(updated) }); return;
+    }
+    if (req.method === 'DELETE' && /^\/api\/parent\/reading\/books\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop());
+      const book = db.prepare('SELECT * FROM reading_books WHERE id = ?').get(id);
+      if (!book || (user.role !== 'admin' && Number(book.creator_id) !== Number(user.id))) { bad(res, 404, '书籍不存在或无权删除'); return; }
+      const planCount = Number(db.prepare('SELECT COUNT(*) AS total FROM reading_plans WHERE book_id = ?').get(id).total || 0);
+      if (planCount) { bad(res, 409, '该书籍已有阅读计划或历史记录，不能删除'); return; }
+      db.prepare('DELETE FROM reading_books WHERE id = ?').run(id);
+      if (book.cover_url) await deleteStoredUrl(book.cover_url, { dataDir }).catch(() => {});
+      json(res, 204, {}); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/parent/reading/plans') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const allowedIds = studentListFor(user).map(student => Number(student.id)); if (!allowedIds.length) { json(res, 200, { plans: [] }); return; }
+      const requestedStudent = Number(url.searchParams.get('studentId')); const studentId = requestedStudent || null;
+      if (studentId && !allowedIds.includes(studentId)) { bad(res, 403, '无权查看该学生的阅读计划'); return; }
+      const conditions = [`reading_plans.student_id IN (${allowedIds.map(() => '?').join(',')})`]; const params = [...allowedIds];
+      if (studentId) { conditions.push('reading_plans.student_id = ?'); params.push(studentId); }
+      const rows = db.prepare(`${readingPlanSelectSql} WHERE ${conditions.join(' AND ')} ORDER BY reading_plans.updated_at DESC, reading_plans.id DESC`).all(...params);
+      json(res, 200, { plans: rows.map(readingPlanJson) }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/parent/reading/plans') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const body = await readBody(req); const bookId = Number(body.bookId); const startDate = clean(body.startDate, 10); const endDate = clean(body.endDate, 10);
+      const startPage = Number(body.startPage || 1); const targetPages = Number(body.targetPages || 0); const targetMinutes = Number(body.targetMinutes || 0);
+      const frequency = clean(body.frequency, 12) || 'daily'; const weekdays = [...new Set((Array.isArray(body.weekdays) ? body.weekdays : []).map(Number).filter(day => Number.isInteger(day) && day >= 1 && day <= 7))].sort((a, b) => a - b);
+      const stars = Number(body.stars); const feedbackType = clean(body.feedbackType, 32) || 'optional_photo_or_video'; const studentIds = [...new Set((Array.isArray(body.studentIds) ? body.studentIds : [body.studentId]).map(Number).filter(Number.isSafeInteger))];
+      const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value) && dateRange(value, value).length === 1;
+      if (!Number.isSafeInteger(bookId) || !studentIds.length || !validDate(startDate) || (endDate && (!validDate(endDate) || endDate < startDate)) || !Number.isSafeInteger(startPage) || startPage < 1 || !['daily', 'weekly'].includes(frequency) || (frequency === 'weekly' && !weekdays.length) || (!Number.isSafeInteger(targetPages) && !Number.isSafeInteger(targetMinutes)) || (targetPages < 1 && targetMinutes < 1) || !Number.isSafeInteger(stars) || stars < 0 || !['none', 'photo', 'video', 'photo_or_video', 'optional_photo_or_video'].includes(feedbackType)) { bad(res, 400, '请完整填写阅读计划信息'); return; }
+      const book = db.prepare('SELECT * FROM reading_books WHERE id = ?').get(bookId); if (!book || (user.role !== 'admin' && book.creator_id !== user.id)) { bad(res, 404, '书籍不存在或无权使用'); return; }
+      if (startPage > book.total_pages) { bad(res, 400, '起始页不能超过书籍总页数'); return; }
+      if (studentIds.some(studentId => !canManageStudent(user, studentId))) { bad(res, 403, '只能给已关联学生创建阅读计划'); return; }
+      const overlap = db.prepare("SELECT 1 FROM reading_plans WHERE book_id = ? AND student_id = ? AND status IN ('active','paused','awaiting_confirmation') LIMIT 1");
+      if (studentIds.some(studentId => overlap.get(bookId, studentId))) { bad(res, 409, '同一学生与书籍当前已有未结束的阅读计划'); return; }
+      const createdAt = now(); const insert = db.prepare(`INSERT INTO reading_plans (book_id, student_id, creator_id, start_date, end_date, start_page, target_pages, target_minutes, frequency, weekdays, needs_review, stars, feedback_type, current_page, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`);
+      db.exec('BEGIN'); let ids = []; try { ids = studentIds.map(studentId => Number(insert.run(bookId, studentId, user.id, startDate, endDate, startPage, targetPages || null, targetMinutes || null, frequency, weekdays.join(','), body.needsReview === false ? 0 : 1, stars, feedbackType, startPage - 1, createdAt, createdAt).lastInsertRowid)); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; }
+      const marks = ids.map(() => '?').join(','); const plans = db.prepare(`${readingPlanSelectSql} WHERE reading_plans.id IN (${marks}) ORDER BY reading_plans.id`).all(...ids).map(readingPlanJson);
+      json(res, 201, { plans }); return;
+    }
+    if (req.method === 'PATCH' && /^\/api\/parent\/reading\/plans\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop());
+      const plan = db.prepare(`${readingPlanSelectSql} WHERE reading_plans.id = ?`).get(id); if (!plan || !canManageStudent(user, plan.student_id)) { bad(res, 404, '阅读计划不存在'); return; }
+      if (!['active', 'paused'].includes(plan.status)) { bad(res, 409, '已完成或待确认的计划不能再修改'); return; }
+      const body = await readBody(req); const startDate = clean(body.startDate, 10) || plan.start_date; const endDate = Object.hasOwn(body, 'endDate') ? clean(body.endDate, 10) : plan.end_date;
+      const targetPages = Object.hasOwn(body, 'targetPages') ? Number(body.targetPages || 0) : plan.target_pages; const targetMinutes = Object.hasOwn(body, 'targetMinutes') ? Number(body.targetMinutes || 0) : plan.target_minutes;
+      const frequency = clean(body.frequency, 12) || plan.frequency; const weekdays = [...new Set((Array.isArray(body.weekdays) ? body.weekdays : String(plan.weekdays || '').split(',')).map(Number).filter(day => Number.isInteger(day) && day >= 1 && day <= 7))].sort((a, b) => a - b);
+      const stars = Object.hasOwn(body, 'stars') ? Number(body.stars) : Number(plan.stars); const feedbackType = clean(body.feedbackType, 32) || plan.feedback_type;
+      const needsReview = Object.hasOwn(body, 'needsReview') ? (body.needsReview === false ? 0 : 1) : Number(plan.needs_review);
+      const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value) && dateRange(value, value).length === 1;
+      const dateBounds = db.prepare('SELECT MIN(checkin_date) AS first_date, MAX(checkin_date) AS last_date FROM reading_checkins WHERE plan_id = ?').get(id);
+      if (!validDate(startDate) || (endDate && (!validDate(endDate) || endDate < startDate)) || (Number(targetPages || 0) < 1 && Number(targetMinutes || 0) < 1) || !['daily', 'weekly'].includes(frequency) || (frequency === 'weekly' && !weekdays.length) || !Number.isSafeInteger(stars) || stars < 0 || !['none', 'photo', 'video', 'photo_or_video', 'optional_photo_or_video'].includes(feedbackType)) { bad(res, 400, '请完整填写有效的计划信息'); return; }
+      if (dateBounds.first_date && startDate > dateBounds.first_date) { bad(res, 409, '开始日期不能晚于已有打卡记录'); return; }
+      if (dateBounds.last_date && endDate && endDate < dateBounds.last_date) { bad(res, 409, '结束日期不能早于已有打卡记录'); return; }
+      db.prepare('UPDATE reading_plans SET start_date=?, end_date=?, target_pages=?, target_minutes=?, frequency=?, weekdays=?, needs_review=?, stars=?, feedback_type=?, updated_at=? WHERE id=?').run(startDate, endDate, targetPages || null, targetMinutes || null, frequency, weekdays.join(','), needsReview, stars, feedbackType, now(), id);
+      const updated = db.prepare(`${readingPlanSelectSql} WHERE reading_plans.id = ?`).get(id); json(res, 200, { plan: readingPlanJson(updated) }); return;
+    }
+    if (req.method === 'DELETE' && /^\/api\/parent\/reading\/plans\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop());
+      const plan = db.prepare(`${readingPlanSelectSql} WHERE reading_plans.id = ?`).get(id); if (!plan || !canManageStudent(user, plan.student_id)) { bad(res, 404, '阅读计划不存在'); return; }
+      if (!['active', 'paused'].includes(plan.status)) { bad(res, 409, '已完成、待确认或已删除的计划不能再次删除'); return; }
+      db.prepare("UPDATE reading_plans SET status='archived', updated_at=? WHERE id=?").run(now(), id);
+      json(res, 204, {}); return;
+    }
+    if (req.method === 'POST' && /^\/api\/parent\/reading\/plans\/\d+\/confirm-completion$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/')[5]);
+      const plan = db.prepare(`${readingPlanSelectSql} WHERE reading_plans.id = ?`).get(id); if (!plan || !canManageStudent(user, plan.student_id)) { bad(res, 404, '阅读计划不存在'); return; }
+      if (plan.status !== 'awaiting_confirmation' || Number(plan.current_page) < Number(plan.total_pages)) { bad(res, 409, '当前计划尚未满足完成确认条件'); return; }
+      const completedAt = now(); db.prepare("UPDATE reading_plans SET status='completed', completed_by=?, completed_at=?, updated_at=? WHERE id=?").run(user.id, completedAt, completedAt, id);
+      const updated = db.prepare(`${readingPlanSelectSql} WHERE reading_plans.id = ?`).get(id); json(res, 200, { plan: readingPlanJson(updated) }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/student/reading') {
+      const user = requireUser(req, res); if (!user) return; if (user.role !== 'student') { bad(res, 403, '学生账号专属接口'); return; }
+      const currentDate = businessDate(); const month = clean(url.searchParams.get('month'), 7) || currentDate.slice(0, 7);
+      if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(month)) { bad(res, 400, '月份格式不正确'); return; }
+      const calendar = monthRange(`${month}-01`);
+      const plans = db.prepare(`${readingPlanSelectSql} WHERE reading_plans.student_id = ? AND reading_plans.status = 'active' ORDER BY reading_plans.created_at DESC, reading_plans.id DESC`).all(user.id);
+      const monthChecks = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.student_id = ? AND reading_checkins.checkin_date BETWEEN ? AND ? ORDER BY reading_checkins.checkin_date DESC, reading_checkins.id DESC`).all(user.id, calendar.start, calendar.end);
+      const todayChecks = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.student_id = ? AND reading_checkins.checkin_date = ? ORDER BY reading_checkins.id DESC`).all(user.id, currentDate);
+      const todayChecksByPlan = new Map(plans.map(plan => [plan.id, todayChecks.filter(check => check.plan_id === plan.id)]));
+      const cards = plans.map(plan => {
+        const planChecks = todayChecksByPlan.get(plan.id) || []; const existing = planChecks.find(check => check.status === 'needs_more') || planChecks[0];
+        const startPage = existing?.status === 'needs_more' ? Number(existing.start_page) : Math.max(Number(plan.start_page), approvedReadingEndPage(plan.id) + 1);
+        const dueToday = readingDueOn(plan, currentDate);
+        const hasPending = planChecks.some(check => check.status === 'pending_review'); const remaining = Math.max(0, 3 - planChecks.length);
+        const canCheckin = Boolean(dueToday && startPage <= Number(plan.total_pages) && !hasPending && (existing?.status === 'needs_more' || remaining > 0));
+        const unavailableReason = hasPending ? '有打卡待审核' : !dueToday ? '今日不安排' : startPage > Number(plan.total_pages) ? '已读完，等待确认' : remaining === 0 ? '本书今日已达 3 次' : '';
+        return { plan: readingPlanJson(plan), checkin: existing ? readingCheckinJson(existing, true) : null, todayCheckins: planChecks.map(check => readingCheckinJson(check, true)), todayCount: planChecks.length, dailyLimit: { max: 3, remaining, hasPending }, expectedStartPage: startPage, canCheckin, unavailableReason };
+      });
+      const readingDays = Number(db.prepare('SELECT COUNT(DISTINCT checkin_date) AS total FROM reading_checkins WHERE student_id = ?').get(user.id).total || 0);
+      const activeBookCount = Number(db.prepare("SELECT COUNT(DISTINCT book_id) AS total FROM reading_plans WHERE student_id = ? AND status = 'active'").get(user.id).total || 0);
+      const awardedStars = Number(db.prepare('SELECT COALESCE(SUM(stars), 0) AS total FROM rewards WHERE student_id = ? AND reading_checkin_id IS NOT NULL').get(user.id).total || 0);
+      const completedBooks = db.prepare(`SELECT reading_books.id, reading_books.title, reading_books.cover_url, COUNT(*) AS completed_count, MAX(reading_plans.completed_at) AS completed_at
+        FROM reading_plans JOIN reading_books ON reading_books.id = reading_plans.book_id
+        WHERE reading_plans.student_id = ? AND reading_plans.status = 'completed'
+        GROUP BY reading_books.id, reading_books.title, reading_books.cover_url
+        ORDER BY completed_at DESC, reading_books.id DESC`).all(user.id).map(book => ({ id: book.id, title: book.title, coverUrl: signStoredUrl(book.cover_url || ''), completedCount: Number(book.completed_count), completedAt: book.completed_at }));
+      const checkinDates = [...new Set(monthChecks.map(check => check.checkin_date))];
+      json(res, 200, { month, calendar, today: currentDate, cards, checkinDates, summary: { readingDays, activeBookCount, awardedStars, growth: rewardBreakdown(awardedStars), completedBookCount: completedBooks.length, completedBookTimes: completedBooks.reduce((total, book) => total + book.completedCount, 0) }, achievements: { completedBooks } }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/student/reading/checkins') {
+      const user = requireUser(req, res); if (!user) return; if (user.role !== 'student') { bad(res, 403, '学生账号专属接口'); return; }
+      const body = await readBody(req, 6 * 1024 * 1024); const planId = Number(body.planId); const checkinDate = clean(body.checkinDate, 10) || businessDate(); const endPage = Number(body.endPage); const reflection = clean(body.reflection, 600);
+      const plan = db.prepare(`${readingPlanSelectSql} WHERE reading_plans.id = ? AND reading_plans.student_id = ?`).get(planId, user.id);
+      if (!plan || plan.status !== 'active') { bad(res, 404, '阅读计划不存在或已结束'); return; }
+      if (!readingDueOn(plan, checkinDate) || checkinDate > businessDate()) { bad(res, 400, '只能在计划阅读日提交当天或历史打卡'); return; }
+      const dailyChecks = db.prepare('SELECT * FROM reading_checkins WHERE plan_id = ? AND checkin_date = ? ORDER BY id DESC').all(planId, checkinDate);
+      const existing = dailyChecks.find(check => check.status === 'needs_more');
+      if (dailyChecks.some(check => check.status === 'pending_review')) { bad(res, 409, '本书当天已有打卡待审核，请等待家长审核后再提交'); return; }
+      if (!existing && dailyChecks.length >= 3) { bad(res, 409, '同一本书每天最多提交 3 次阅读打卡'); return; }
+      const startPage = existing ? existing.start_page : Math.max(Number(plan.start_page), approvedReadingEndPage(planId) + 1);
+      if (!Number.isSafeInteger(endPage) || endPage < startPage || endPage > Number(plan.total_pages)) { bad(res, 400, `结束页应为 ${startPage} 至 ${plan.total_pages} 的整数`); return; }
+      const feedbackRequired = !['none', 'optional_photo_or_video'].includes(plan.feedback_type); const feedback = await readingFeedbackValue(body.feedbackData, existing?.feedback_url || '', body.feedbackName || '阅读打卡反馈');
+      if (!feedback || (feedbackRequired && !feedback.url)) { bad(res, 400, feedback ? '请按阅读计划要求上传反馈' : '反馈文件仅支持图片或视频，且不超过 4 MB'); return; }
+      if (plan.feedback_type === 'photo' && feedback.kind && feedback.kind !== 'image') { bad(res, 400, '该计划仅支持图片反馈'); return; }
+      if (plan.feedback_type === 'video' && feedback.kind && feedback.kind !== 'video') { bad(res, 400, '该计划仅支持视频反馈'); return; }
+      const submittedAt = now(); const status = plan.needs_review ? 'pending_review' : 'completed';
+      db.exec('BEGIN'); let id; try {
+        if (existing) { db.prepare('UPDATE reading_checkins SET start_page=?, end_page=?, pages_read=?, reflection=?, feedback_kind=?, feedback_url=?, feedback_name=?, status=?, submitted_at=?, parent_message=\'\', awarded_stars=?, updated_at=? WHERE id=?').run(startPage, endPage, endPage - startPage + 1, reflection, feedback.kind, feedback.url, clean(body.feedbackName, 120), status, submittedAt, plan.needs_review ? null : plan.stars, submittedAt, existing.id); id = existing.id; }
+        else { id = Number(db.prepare('INSERT INTO reading_checkins (plan_id, student_id, checkin_date, start_page, end_page, pages_read, reflection, feedback_kind, feedback_url, feedback_name, status, submitted_at, awarded_stars, created_at, updated_at, checkin_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(planId, user.id, checkinDate, startPage, endPage, endPage - startPage + 1, reflection, feedback.kind, feedback.url, clean(body.feedbackName, 120), status, submittedAt, plan.needs_review ? null : plan.stars, submittedAt, submittedAt, dailyChecks.length + 1).lastInsertRowid); }
+        if (!plan.needs_review) { db.prepare('UPDATE reading_plans SET current_page = MAX(current_page, ?), status = CASE WHEN MAX(current_page, ?) >= ? THEN \'awaiting_confirmation\' ELSE status END, updated_at=? WHERE id=?').run(endPage, endPage, plan.total_pages, submittedAt, planId); if (plan.stars > 0) db.prepare('INSERT INTO rewards (student_id, task_id, reading_checkin_id, stars, message, created_at) VALUES (?, NULL, ?, ?, ?, ?)').run(user.id, id, plan.stars, `阅读打卡：${plan.book_title}`, submittedAt); }
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); if (feedback.uploadedUrl) await deleteStoredUrl(feedback.uploadedUrl, { dataDir }).catch(() => {}); throw error; }
+      const checkin = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.id = ?`).get(id); json(res, 201, { checkin: readingCheckinJson(checkin, true) }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/parent/reading/checkins') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const allowedIds = studentListFor(user).map(student => Number(student.id)); if (!allowedIds.length) { json(res, 200, { checkins: [] }); return; }
+      const status = clean(url.searchParams.get('status'), 20) || 'pending_review'; const valid = ['pending_review', 'needs_more', 'completed', 'all']; if (!valid.includes(status)) { bad(res, 400, '状态不正确'); return; }
+      const conditions = [`reading_checkins.student_id IN (${allowedIds.map(() => '?').join(',')})`]; const params = [...allowedIds]; if (status !== 'all') { conditions.push('reading_checkins.status = ?'); params.push(status); }
+      const rows = db.prepare(`${readingCheckinSelectSql} WHERE ${conditions.join(' AND ')} ORDER BY reading_checkins.submitted_at DESC, reading_checkins.id DESC`).all(...params);
+      json(res, 200, { checkins: rows.map(row => readingCheckinJson(row)) }); return;
+    }
+    if (req.method === 'GET' && /^\/api\/parent\/reading\/checkins\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop());
+      const row = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.id = ?`).get(id); if (!row || !canManageStudent(user, row.student_id)) { bad(res, 404, '阅读打卡不存在'); return; }
+      json(res, 200, { checkin: readingCheckinJson(row, true) }); return;
+    }
+    if (req.method === 'POST' && /^\/api\/parent\/reading\/checkins\/\d+\/review$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/')[5]); const body = await readBody(req);
+      const checkin = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.id = ?`).get(id); if (!checkin || !canManageStudent(user, checkin.student_id)) { bad(res, 404, '阅读打卡不存在'); return; }
+      if (checkin.status !== 'pending_review') { bad(res, 409, '该阅读打卡已经处理'); return; }
+      const action = clean(body.action, 16); const message = clean(body.message, 300); const adjustedEndPage = Object.hasOwn(body, 'endPage') ? Number(body.endPage) : Number(checkin.end_page);
+      const awardedStars = Object.hasOwn(body, 'stars') ? Number(body.stars) : Number(checkin.plan_stars);
+      if (!['approve', 'needs_more'].includes(action) || !Number.isSafeInteger(adjustedEndPage) || adjustedEndPage < checkin.start_page || adjustedEndPage > checkin.total_pages || (action === 'approve' && (!Number.isSafeInteger(awardedStars) || awardedStars < 0))) { bad(res, 400, '审核信息不正确'); return; }
+      const reason = clean(body.adjustmentReason, 300); if (action === 'approve' && adjustedEndPage !== Number(checkin.end_page) && !reason) { bad(res, 400, '调整阅读结束页时请填写调整原因'); return; }
+      const reviewedAt = now(); db.exec('BEGIN'); try {
+        if (action === 'needs_more') db.prepare("UPDATE reading_checkins SET status='needs_more', parent_message=?, reviewed_by=?, reviewed_at=?, updated_at=? WHERE id=?").run(message, user.id, reviewedAt, reviewedAt, id);
+        else { db.prepare("UPDATE reading_checkins SET status='completed', end_page=?, pages_read=?, parent_message=?, reviewed_by=?, reviewed_at=?, original_end_page=COALESCE(original_end_page, end_page), adjusted_end_page=?, adjustment_reason=?, awarded_stars=?, updated_at=? WHERE id=?").run(adjustedEndPage, adjustedEndPage - checkin.start_page + 1, message, user.id, reviewedAt, adjustedEndPage, reason, awardedStars, reviewedAt, id); db.prepare("UPDATE reading_plans SET current_page=MAX(current_page, ?), status=CASE WHEN MAX(current_page, ?) >= ? THEN 'awaiting_confirmation' ELSE status END, updated_at=? WHERE id=?").run(adjustedEndPage, adjustedEndPage, checkin.total_pages, reviewedAt, checkin.plan_id); if (awardedStars > 0) db.prepare('INSERT INTO rewards (student_id, task_id, reading_checkin_id, stars, message, created_at) VALUES (?, NULL, ?, ?, ?, ?)').run(checkin.student_id, id, awardedStars, message || `阅读打卡：${checkin.book_title}`, reviewedAt); }
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      const updated = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.id = ?`).get(id); json(res, 200, { checkin: readingCheckinJson(updated, true) }); return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/parent/reviews') {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
       const students = studentListFor(user);
@@ -1134,13 +1490,19 @@ const server = createServer(async (req, res) => {
           AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?)
             OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?))`);
       const rewardStats = db.prepare('SELECT COALESCE(SUM(stars), 0) AS stars FROM rewards WHERE student_id = ? AND substr(created_at, 1, 10) BETWEEN ? AND ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))');
+      const readingStats = db.prepare(`SELECT COALESCE(SUM(CASE WHEN reading_checkins.status = 'completed' THEN reading_checkins.pages_read ELSE 0 END), 0) AS pages,
+        SUM(CASE WHEN reading_checkins.status = 'completed' THEN 1 ELSE 0 END) AS checkins,
+        SUM(CASE WHEN reading_checkins.status = 'pending_review' THEN 1 ELSE 0 END) AS pending
+        FROM reading_checkins WHERE reading_checkins.student_id = ? AND reading_checkins.checkin_date BETWEEN ? AND ?`);
+      const completedBooks = db.prepare("SELECT COUNT(*) AS total FROM reading_plans WHERE student_id = ? AND status = 'completed' AND substr(completed_at, 1, 10) BETWEEN ? AND ?");
       const rows = students.map(student => {
         const tasks = taskStats.get(student.id, range.end, range.start, range.start, range.end);
         const stars = Number(rewardStats.get(student.id, range.start, range.end).stars || 0);
+        const reading = readingStats.get(student.id, range.start, range.end);
         const total = Number(tasks.total || 0); const completed = Number(tasks.completed || 0); const onTime = Number(tasks.on_time || 0);
-        return { studentId: student.id, studentName: student.display_name, studentAvatar: signStoredUrl(student.avatar), active: Boolean(student.active), stars, total, completed, onTime, completionRate: total ? Math.round(completed / total * 100) : null, onTimeRate: total ? Math.round(onTime / total * 100) : null };
+        return { studentId: student.id, studentName: student.display_name, studentAvatar: signStoredUrl(student.avatar), active: Boolean(student.active), stars, total, completed, onTime, readingPages: Number(reading.pages || 0), readingCheckins: Number(reading.checkins || 0), readingPending: Number(reading.pending || 0), completedBooks: Number(completedBooks.get(student.id, range.start, range.end).total || 0), completionRate: total ? Math.round(completed / total * 100) : null, onTimeRate: total ? Math.round(onTime / total * 100) : null };
       }).sort((a, b) => b.stars - a.stars || (b.completionRate ?? -1) - (a.completionRate ?? -1) || a.studentName.localeCompare(b.studentName, 'zh-CN'));
-      const summary = rows.reduce((total, row) => ({ stars: total.stars + row.stars, tasks: total.tasks + row.total, completed: total.completed + row.completed, onTime: total.onTime + row.onTime }), { stars: 0, tasks: 0, completed: 0, onTime: 0 });
+      const summary = rows.reduce((total, row) => ({ stars: total.stars + row.stars, tasks: total.tasks + row.total, completed: total.completed + row.completed, onTime: total.onTime + row.onTime, readingPages: total.readingPages + row.readingPages, readingCheckins: total.readingCheckins + row.readingCheckins, completedBooks: total.completedBooks + row.completedBooks }), { stars: 0, tasks: 0, completed: 0, onTime: 0, readingPages: 0, readingCheckins: 0, completedBooks: 0 });
       summary.completionRate = summary.tasks ? Math.round(summary.completed / summary.tasks * 100) : null;
       summary.onTimeRate = summary.tasks ? Math.round(summary.onTime / summary.tasks * 100) : null;
       json(res, 200, { period: { key: period, label: range.label, start: range.start, end: range.end }, summary, students: rows });
@@ -1263,7 +1625,7 @@ const server = createServer(async (req, res) => {
         : null;
       if (title.length < 2) { bad(res, 400, '任务模板标题需为 2 至 80 个字符'); return; }
       if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
-      if (!['photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
+      if (!['photo_or_video', 'optional_photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
       if (!resources) { bad(res, 400, taskResourceValidationMessage(body)); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
@@ -1306,7 +1668,7 @@ const server = createServer(async (req, res) => {
       const replaceResources = Array.isArray(body.resources) || Array.isArray(body.existingResourceIds) || Boolean(body.resourceData) || body.removeResource === true;
       if (title.length < 2) { bad(res, 400, '任务模板标题需为 2 至 80 个字符'); return; }
       if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
-      if (!['photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
+      if (!['photo_or_video', 'optional_photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
       if (!resources) { bad(res, 400, taskResourceValidationMessage(body)); return; }
       if (!existingResourceIds || existingResourceIds.length + resources.length > 5) { bad(res, 400, '任务资料选择无效或超过 5 个文件'); return; }
       const allowedResourceIds = new Set(linkedResources('template', templateId, current.resource_id).map(resource => resource.id));
@@ -1429,12 +1791,13 @@ const server = createServer(async (req, res) => {
       const week = weekRange(date);
       const baseSql = `SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE ((tasks.schedule_type = 'range' AND tasks.available_start_date <= ? AND tasks.available_end_date >= ?) OR (tasks.schedule_type <> 'range' AND tasks.task_date BETWEEN ? AND ?)) AND tasks.is_demo = 0`;
       const weekRows = studentId
-        ? db.prepare(`${baseSql} AND tasks.student_id = ? ORDER BY tasks.task_date, tasks.created_at DESC, tasks.id DESC`).all(week.end, week.start, week.start, week.end, studentId)
-        : db.prepare(`${baseSql} AND tasks.student_id IN (${allowedIds.map(() => '?').join(',')}) ORDER BY tasks.task_date, tasks.created_at DESC, users.display_name, tasks.id DESC`).all(week.end, week.start, week.start, week.end, ...allowedIds);
+        ? db.prepare(`${baseSql} AND tasks.student_id = ? ORDER BY ${taskStatusOrderSql}, tasks.created_at DESC, tasks.id DESC`).all(week.end, week.start, week.start, week.end, studentId)
+        : db.prepare(`${baseSql} AND tasks.student_id IN (${allowedIds.map(() => '?').join(',')}) ORDER BY ${taskStatusOrderSql}, tasks.created_at DESC, tasks.id DESC`).all(week.end, week.start, week.start, week.end, ...allowedIds);
       const serialized = weekRows.map(taskJson);
       const weekTasks = Object.fromEntries(dateRange(week.start, week.end).map(day => [day, serialized.filter(task => taskVisibleOn(task, day))]));
       const taskDates = Object.entries(weekTasks).filter(([, dayTasks]) => dayTasks.length).map(([day]) => day);
-      json(res, 200, { tasks: weekTasks[date] || [], taskDates, weekTasks });
+      const incompleteTaskDates = overdueUnfinishedTaskDates(weekTasks);
+      json(res, 200, { tasks: weekTasks[date] || [], taskDates, incompleteTaskDates, weekTasks });
       return;
     }
     if (req.method === 'GET' && /^\/api\/parent\/tasks\/\d+$/.test(url.pathname)) {
@@ -1459,9 +1822,11 @@ const server = createServer(async (req, res) => {
       const category = db.prepare('SELECT name, icon, color FROM task_categories WHERE id = ? AND active = 1').get(Number(body.categoryId));
       const duration = Number(body.duration);
       const stars = Number(body.stars);
+      const feedbackType = clean(body.feedbackType, 30) || 'photo_or_video';
       const resources = normalizeTaskResources(body);
       if (title.length < 2 || !schedule) { bad(res, 400, '请填写任务标题和有效日期；持续日期和重复日期都必须填写有效的结束日期'); return; }
       if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
+      if (!['photo_or_video', 'optional_photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
       if (!resources) { bad(res, 400, taskResourceValidationMessage(body)); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
@@ -1475,7 +1840,7 @@ const server = createServer(async (req, res) => {
         for (const studentId of studentIds) {
           const seriesId = schedule.scheduleType === 'repeat' ? randomBytes(12).toString('hex') : '';
           for (const date of schedule.dates) {
-            const taskId = Number(insert.run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', date, duration, stars, clean(body.feedbackType, 30) || 'photo_or_video', body.needsReview === false ? 0 : 1, resourceId, now(), seriesId, schedule.repeatPattern, schedule.weekdays.join(','), schedule.startDate, schedule.endDate, schedule.scheduleType, schedule.scheduleType === 'range' ? schedule.startDate : date, schedule.scheduleType === 'range' ? schedule.endDate : date).lastInsertRowid);
+            const taskId = Number(insert.run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', date, duration, stars, feedbackType, body.needsReview === false ? 0 : 1, resourceId, now(), seriesId, schedule.repeatPattern, schedule.weekdays.join(','), schedule.startDate, schedule.endDate, schedule.scheduleType, schedule.scheduleType === 'range' ? schedule.startDate : date, schedule.scheduleType === 'range' ? schedule.endDate : date).lastInsertRowid);
             linkResources('task', taskId, resourceIds);
             taskIds.push(taskId);
           }
@@ -1520,7 +1885,7 @@ const server = createServer(async (req, res) => {
       if (scopeSeries && studentId !== task.student_id) { bad(res, 400, '重复任务系列不能更换学生'); return; }
       if (title.length < 2 || (!scopeSeries && !schedule)) { bad(res, 400, '请填写任务标题和有效日期范围'); return; }
       if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
-      if (!['photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
+      if (!['photo_or_video', 'optional_photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
       if (!resources) { bad(res, 400, taskResourceValidationMessage(body)); return; }
       if (!existingResourceIds || existingResourceIds.length + resources.length > 5) { bad(res, 400, '任务资料选择无效或超过 5 个文件'); return; }
       const allowedResourceIds = new Set(linkedResources('task', task.id, task.resource_id).map(resource => resource.id));

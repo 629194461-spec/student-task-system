@@ -69,10 +69,13 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal(Object.keys(studentWeek.body.weekTasks).length, 7);
   assert.ok(studentWeek.body.weekTasks[currentDate].some(task => task.title === '草稿任务'));
   assert.ok(studentWeek.body.weekTasks[addDays(currentDate, 1)].some(task => task.title === '未来任务'));
+  assert.ok(!studentWeek.body.incompleteTaskDates.includes(currentDate), 'today\'s unfinished tasks are not overdue reminders');
+  assert.ok(!studentWeek.body.incompleteTaskDates.includes(addDays(currentDate, 1)), 'future tasks are not overdue reminders');
   const parentWeek = await request(`/api/parent/tasks?date=${currentDate}&studentId=${firstId}`, { cookie: admin });
   assert.equal(Object.keys(parentWeek.body.weekTasks).length, 7);
   assert.ok(parentWeek.body.weekTasks[currentDate].some(task => task.title === '草稿任务'));
   assert.ok(parentWeek.body.weekTasks[addDays(currentDate, 1)].some(task => task.title === '未来任务'));
+  assert.ok(!parentWeek.body.incompleteTaskDates.includes(currentDate), 'parent date controls only receive overdue task markers');
 
   const draftId = draftTask.body.taskIds[0];
   const studentDetailBeforeStart = await request(`/api/student/tasks/${draftId}`, { cookie: firstLogin.cookie });
@@ -104,12 +107,14 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal(started.body.task.status, 'in_progress');
   assert.equal(started.body.task.feedbackNote, '已经完成一半');
   assert.ok(started.body.task.startedAt);
-  const edited = await request(`/api/parent/tasks/${draftId}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ studentId: firstId, title: '修改后的草稿任务', detail: '家长已调整要求', categoryId, duration: 20, stars: 3, feedbackType: 'none', needsReview: true, date: currentDate }) });
+  const movedSingleDate = addDays(currentDate, 2);
+  const edited = await request(`/api/parent/tasks/${draftId}`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ studentId: firstId, title: '修改后的草稿任务', detail: '家长已调整要求', categoryId, duration: 20, stars: 3, feedbackType: 'none', needsReview: true, date: movedSingleDate }) });
   assert.equal(edited.response.status, 200);
   assert.equal(edited.body.task.title, '修改后的草稿任务');
   assert.equal(edited.body.task.duration, 20);
   assert.equal(edited.body.task.stars, 3);
   assert.equal(edited.body.task.status, 'in_progress');
+  assert.equal(edited.body.task.date, movedSingleDate, 'a parent can move an unfinished single-date task');
   const detail = await request(`/api/student/tasks/${draftId}`, { cookie: firstLogin.cookie });
   assert.equal(detail.body.task.feedbackNote, '已经完成一半');
   assert.equal(detail.body.task.resources[0].data, parentFileUrl, 'editing task fields must preserve unchanged attachment URLs');
@@ -130,20 +135,36 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   const otherId = otherTask.body.taskIds[0];
   await request(`/api/student/tasks/${otherId}/submit`, { cookie: secondLogin.cookie, method: 'POST', body: '{}' });
 
+  const sortNotStartedOlder = await assign(firstId, '排序-未开始-较早创建', currentDate, true);
+  const sortNotStartedNewer = await assign(firstId, '排序-未开始-较晚创建', currentDate, true);
+  const sortPending = await assign(firstId, '排序-待审核', currentDate, true);
+  const sortCompleted = await assign(firstId, '排序-已完成', currentDate, false);
+  for (const result of [sortNotStartedOlder, sortNotStartedNewer, sortPending, sortCompleted]) assert.equal(result.response.status, 201);
+  assert.equal((await request(`/api/student/tasks/${sortPending.body.taskIds[0]}/submit`, { cookie: firstLogin.cookie, method: 'POST', body: '{}' })).body.task.status, 'pending_review');
+  assert.equal((await request(`/api/student/tasks/${sortCompleted.body.taskIds[0]}/submit`, { cookie: firstLogin.cookie, method: 'POST', body: '{}' })).body.task.status, 'completed');
+  const expectedSortIds = [sortNotStartedNewer, sortNotStartedOlder, sortPending, sortCompleted].map(result => result.body.taskIds[0]);
+  const sortedStudentDashboard = await request(`/api/student/dashboard?date=${currentDate}`, { cookie: firstLogin.cookie });
+  assert.deepEqual(sortedStudentDashboard.body.tasks.filter(task => expectedSortIds.includes(task.id)).map(task => task.id), expectedSortIds, 'student dashboard orders active tasks first, then pending review, then completed');
+  const sortedParentTasks = await request(`/api/parent/tasks?date=${currentDate}&studentId=${firstId}`, { cookie: admin });
+  assert.deepEqual(sortedParentTasks.body.tasks.filter(task => expectedSortIds.includes(task.id)).map(task => task.id), expectedSortIds, 'parent task assignment uses the same status and creation order');
+  const sortedStudentTodo = await request('/api/student/tasks?filter=todo', { cookie: firstLogin.cookie });
+  assert.deepEqual(sortedStudentTodo.body.tasks.filter(task => [sortNotStartedNewer.body.taskIds[0], sortNotStartedOlder.body.taskIds[0]].includes(task.id)).map(task => task.id), expectedSortIds.slice(0, 2), 'tasks in the same active state are newest first');
+
   const pendingList = await request('/api/student/tasks?filter=pending_review', { cookie: firstLogin.cookie });
   const completedList = await request('/api/student/tasks?filter=completed', { cookie: firstLogin.cookie });
   const futureList = await request('/api/student/tasks?filter=future', { cookie: firstLogin.cookie });
-  assert.deepEqual(pendingList.body.tasks.map(task => task.id), [draftId]);
-  assert.equal(pendingList.body.tasks[0].resourceName, parentFile.name);
-  assert.equal(pendingList.body.tasks[0].resourceCount, 1);
+  const pendingDraft = pendingList.body.tasks.find(task => task.id === draftId);
+  assert.ok(pendingDraft);
+  assert.equal(pendingDraft.resourceName, parentFile.name);
+  assert.equal(pendingDraft.resourceCount, 1);
   assert.ok(completedList.body.tasks.some(task => task.id === completedId));
   assert.ok(futureList.body.tasks.some(task => task.id === futureTask.body.taskIds[0]));
 
   const firstDashboard = await request(`/api/parent/dashboard?studentId=${firstId}`, { cookie: admin });
   const secondDashboard = await request(`/api/parent/dashboard?studentId=${secondId}`, { cookie: admin });
-  assert.equal(firstDashboard.body.summary.pending, 1);
+  assert.equal(firstDashboard.body.summary.pending, 2);
   assert.ok(firstDashboard.body.pending.every(task => task.studentId === firstId));
-  assert.equal(firstDashboard.body.pending[0].resourceName, parentFile.name);
+  assert.equal(firstDashboard.body.pending.find(task => task.id === draftId).resourceName, parentFile.name);
   assert.equal(secondDashboard.body.summary.pending, 1);
   assert.ok(secondDashboard.body.pending.every(task => task.studentId === secondId));
   const reviewList = await request('/api/parent/reviews?studentId=all&period=all', { cookie: admin });
@@ -235,6 +256,44 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
     const day = await request(`/api/student/dashboard?date=${date}`, { cookie: secondLogin.cookie });
     assert.equal(day.body.tasks.find(task => task.id === completableRangeId)?.status, 'completed', 'one completion updates the shared task across its whole date range');
   }
+
+  const earlyRangeStart = addDays(currentDate, 2);
+  const earlyRangeEnd = addDays(currentDate, 5);
+  const earlyRange = await request('/api/parent/tasks', {
+    cookie: admin,
+    method: 'POST',
+    body: JSON.stringify({ studentIds: [secondId], title: '可提前完成的持续任务', detail: '学生可以提前开始', categoryId, duration: 20, stars: 3, feedbackType: 'none', needsReview: false, scheduleType: 'range', startDate: earlyRangeStart, endDate: earlyRangeEnd })
+  });
+  assert.equal(earlyRange.response.status, 201);
+  const earlyRangeId = earlyRange.body.taskIds[0];
+  const futureRanges = await request('/api/student/tasks?filter=future', { cookie: secondLogin.cookie });
+  assert.ok(futureRanges.body.tasks.some(task => task.id === earlyRangeId), 'future continuous-date tasks are available from the task list');
+  const earlyStarted = await request(`/api/student/tasks/${earlyRangeId}/draft`, { cookie: secondLogin.cookie, method: 'PATCH', body: JSON.stringify({ feedbackNote: '提前开始学习' }) });
+  assert.equal(earlyStarted.response.status, 200);
+  assert.equal(earlyStarted.body.task.status, 'in_progress', 'students may begin a continuous-date task before its start date');
+  const earlyCompleted = await request(`/api/student/tasks/${earlyRangeId}/submit`, { cookie: secondLogin.cookie, method: 'POST', body: JSON.stringify({}) });
+  assert.equal(earlyCompleted.response.status, 200);
+  assert.equal(earlyCompleted.body.task.status, 'completed');
+
+  const optionalFeedbackWithoutFile = await request('/api/parent/tasks', {
+    cookie: admin,
+    method: 'POST',
+    body: JSON.stringify({ studentIds: [secondId], title: '选填反馈任务', detail: '可按需上传学习成果', categoryId, duration: 10, stars: 2, feedbackType: 'optional_photo_or_video', needsReview: false, date: currentDate })
+  });
+  assert.equal(optionalFeedbackWithoutFile.response.status, 201);
+  const optionalNoFileSubmit = await request(`/api/student/tasks/${optionalFeedbackWithoutFile.body.taskIds[0]}/submit`, { cookie: secondLogin.cookie, method: 'POST', body: JSON.stringify({}) });
+  assert.equal(optionalNoFileSubmit.response.status, 200);
+  assert.equal(optionalNoFileSubmit.body.task.status, 'completed', 'optional feedback does not require an attachment');
+
+  const optionalFeedbackWithFile = await request('/api/parent/tasks', {
+    cookie: admin,
+    method: 'POST',
+    body: JSON.stringify({ studentIds: [secondId], title: '选填反馈上传任务', detail: '可以自愿上传图片', categoryId, duration: 10, stars: 2, feedbackType: 'optional_photo_or_video', needsReview: false, date: currentDate })
+  });
+  assert.equal(optionalFeedbackWithFile.response.status, 201);
+  const optionalFileSubmit = await request(`/api/student/tasks/${optionalFeedbackWithFile.body.taskIds[0]}/submit`, { cookie: secondLogin.cookie, method: 'POST', body: JSON.stringify({ feedbackData: avatar, feedbackName: '自愿上传.png' }) });
+  assert.equal(optionalFileSubmit.response.status, 200);
+  assert.equal(optionalFileSubmit.body.task.feedbackKind, 'image', 'optional feedback accepts a voluntarily uploaded image');
 
   const largeImageBytes = Buffer.alloc(Math.floor(3.2 * 1024 * 1024), 0x61);
   largeImageBytes.set([0xff, 0xd8, 0xff], 0);
