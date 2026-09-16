@@ -1,6 +1,6 @@
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const $$ = (selector, parent = document) => [...parent.querySelectorAll(selector)];
-const state = { user: null, role: 'student', captchaId: null, student: null, parent: null, parents: [], students: [], tasks: [], studentListTasks: [], studentTaskFilter: 'overdue', rewardApplicationFilter: 'all', studentTaskListCache: new Map(), studentDate: '', studentDashboardCache: new Map(), studentLoadController: null, parentTaskCache: new Map(), parentTaskLoadController: null, pageLoads: new Map(), pageLoadedAt: new Map(), categories: [], templates: [], templateCategoryFilter: 'all', templateSearch: '', templatePickerCategoryId: null, editingTemplateId: null, copyingTemplateId: null, templateResources: [], removeTemplateResource: false, selectedTemplateIds: [], templateDateMode: 'single', pendingTemplateId: null, reviews: [], rewardApplications: [], readingReviews: [], readingData: null, readingDate: '', readingBooks: [], readingPlans: [], readingParentTab: 'plans', readingFrequency: 'daily', readingCoverData: '', readingCoverName: '', readingCoverExisting: false, readingFeedbackData: '', readingFeedbackName: '', pendingReadingDelete: null, statsPeriod: 'week', dashboardStudentId: null, activeStudentId: null, activeParentId: null, studentAvatar: '', parentAvatar: '', taskFeedbackData: '', taskFeedbackName: '', taskResources: [], removeTaskResource: false, editingTaskId: null, editingTask: null, pendingTaskUpdate: null, activeTaskDetail: null, pendingStudentStatus: null, pendingParentStatus: null, pendingUnlinkParentId: null, taskDate: '', taskStudentId: null, parentTasks: [], taskDates: [], assignmentDateMode: 'single', selectedCategoryIcon: '', pendingTaskId: null, pendingDeleteTask: null, pendingCategoryId: null };
+const state = { user: null, role: 'student', captchaId: null, student: null, parent: null, parents: [], students: [], tasks: [], studentListTasks: [], studentTaskFilter: 'overdue', rewardApplicationFilter: 'all', studentTaskListCache: new Map(), studentDate: '', studentDashboardCache: new Map(), studentLoadController: null, parentTaskCache: new Map(), parentTaskLoadController: null, pageLoads: new Map(), pageLoadedAt: new Map(), categories: [], templates: [], templateCategoryFilter: 'all', templateSearch: '', templatePickerCategoryId: null, editingTemplateId: null, copyingTemplateId: null, templateResources: [], removeTemplateResource: false, selectedTemplateIds: [], templateDateMode: 'single', pendingTemplateId: null, reviews: [], rewardApplications: [], readingReviews: [], readingData: null, readingDate: '', readingBooks: [], readingPlans: [], readingParentTab: 'plans', readingFrequency: 'daily', readingCoverData: '', readingCoverName: '', readingCoverExisting: false, readingFeedbackData: '', readingFeedbackName: '', pendingReadingDelete: null, statsPeriod: 'week', dashboardStudentId: null, activeStudentId: null, activeParentId: null, studentAvatar: '', parentAvatar: '', taskFeedbackData: '', taskFeedbackName: '', taskResources: [], removeTaskResource: false, editingTaskId: null, editingTask: null, pendingTaskUpdate: null, activeTaskDetail: null, pendingStudentStatus: null, pendingParentStatus: null, pendingUnlinkParentId: null, taskDate: '', taskStudentId: null, parentTasks: [], taskDates: [], taskDateMarkers: {}, taskWeekTasks: {}, assignmentDateMode: 'single', selectedCategoryIcon: '', pendingTaskId: null, pendingDeleteTask: null, pendingCategoryId: null, petData: null, petAdoption: null, activePetStudentId: null, petIdleTimer: null, petIdlePauseTimer: null, petAnimationTimer: null };
 const statusMeta = { not_started: ['waiting', '等待开始', '开始任务'], in_progress: ['draft', '进行中', '继续任务'], pending_review: ['waiting', '待审核', '等待审核'], completed: ['done', '已完成', '已完成'], needs_more: ['draft', '待补充', '补充反馈'] };
 const categoryClass = { '语文小屋': 'cat-chinese', '数学乐园': 'cat-math', '阅读时光': 'cat-reading', '生活小能手': 'cat-life' };
 const categoryIcons = [
@@ -310,18 +310,36 @@ function taskCard(task, compact = false) {
     : `<button class="${actionClass}" ${task.status === 'pending_review' || !rangeCanBeWorkedOn(task) ? 'disabled' : `data-start-task="${task.id}"`}>${!rangeCanBeWorkedOn(task) ? '已截止' : action}</button>`;
   return `<article class="task-card task-detail-row" data-task="${task.id}" role="button" tabindex="0" aria-label="查看${escapeHtml(task.title)}详情"><span class="category-icon ${categoryClass[task.category] || 'cat-math'}">${categoryIconMarkup(task.icon)}</span><div class="task-main"><h3>${escapeHtml(task.title)}</h3>${scheduleBadge(task)}<p class="task-description">${escapeHtml(task.detail || '暂无任务说明')}</p><div class="task-meta"><p>${icon('clock-3')} ${task.duration || 15} 分钟</p>${resourceBadge(task)}<span class="status ${klass}">${label}</span></div></div>${compact ? '' : `<div class="task-action"><span class="stars">⭐ ${task.stars} 颗星星</span>${actionControl}</div>`}</article>`;
 }
+function taskDateMarker(date, weekTasks = {}, fallbackMarkers = {}) {
+  const tasks = weekTasks?.[date];
+  if (!Array.isArray(tasks)) return fallbackMarkers[date] || '';
+  if (!tasks.length) return '';
+  const completed = task => String(task?.status || '').toLowerCase() === 'completed';
+  const overdue = task => {
+    if (completed(task)) return false;
+    if (task?.isDateRange || task?.scheduleType === 'range') {
+      const endDate = task.availableEndDate || task.endDate || task.date;
+      return date === endDate && endDate < today();
+    }
+    return date < today();
+  };
+  if (tasks.every(completed)) return 'completed';
+  if (tasks.some(overdue)) return 'overdue';
+  return date >= today() ? 'active' : '';
+}
 function renderStudentWeek(data) {
   const labels = ['一', '二', '三', '四', '五', '六', '日'];
   const start = startOfWeek(state.studentDate);
-  const incompleteDates = new Set(data.incompleteTaskDates || []);
+  const markers = data.taskDateMarkers || {};
   const previousWeekUnfinishedCount = Number(data.previousWeekUnfinishedCount || 0);
   const reminder = $('#student-week-incomplete-reminder');
   reminder.hidden = previousWeekUnfinishedCount < 1;
   reminder.textContent = previousWeekUnfinishedCount ? `上周还有 ${previousWeekUnfinishedCount} 个任务未完成` : '';
   $('#student-week').innerHTML = labels.map((label, index) => {
     const date = addDays(start, index);
-    const hasUnfinished = incompleteDates.has(date);
-    return `<button type="button" data-student-date="${date}" class="${date === state.studentDate ? 'selected' : ''} ${date === today() ? 'today' : ''}"><small>${label}</small><strong>${parseDate(date).getUTCDate()}</strong>${data.taskDates?.includes(date) ? `<i class="${hasUnfinished ? 'unfinished' : ''}" aria-label="${hasUnfinished ? '有未完成任务' : '有任务'}"></i>` : ''}</button>`;
+    const marker = taskDateMarker(date, data.weekTasks, markers);
+    const labelText = { overdue: '有未完成任务', completed: '任务已全部完成', active: '有进行中的任务' }[marker];
+    return `<button type="button" data-student-date="${date}" class="${date === state.studentDate ? 'selected' : ''} ${date === today() ? 'today' : ''}"><small>${label}</small><strong>${parseDate(date).getUTCDate()}</strong>${marker ? `<i class="date-marker ${marker}" aria-label="${labelText}"></i>` : ''}</button>`;
   }).join('');
 }
 function studentTaskListRow(task) {
@@ -345,6 +363,92 @@ function renderStudent(data) {
   $('.next-reward h2').textContent = `还差 ${100 - data.growth.stars} 颗星星`;
   $('.next-reward .progress-track span').style.width = `${data.growth.stars}%`;
   refreshIcons();
+}
+function petExpProgress(pet) {
+  const level = Number(pet?.level || 1);
+  const total = Number(pet?.totalExp || 0);
+  const spent = Array.from({ length: Math.max(0, level - 1) }).reduce((sum, _, index) => sum + 100 + 20 * Math.floor(index / 10), 0);
+  const required = 100 + 20 * Math.floor((level - 1) / 10);
+  return { current: Math.max(0, total - spent), required, percent: Math.min(100, Math.round((Math.max(0, total - spent) / required) * 100)) };
+}
+function petStateBar(label, value, tone = '') { return `<div class="pet-state-row"><span>${escapeHtml(label)}</span><div class="pet-state-track"><i class="${tone}" style="width:${Math.max(0, Math.min(100, Number(value) || 0))}%"></i></div><b>${Math.round(Number(value) || 0)}</b></div>`; }
+function petStageMarkup(pet) { const image = escapeHtml(pet.species.assetUrl); const alt = escapeHtml(pet.species.name); const hasIdleVideo = pet.species.code === 'star_ring_bunny'; return `<div class="pet-stage ${hasIdleVideo ? 'pet-idle-video' : ''}" data-pet-species="${escapeHtml(pet.species.code)}"><div class="pet-character"><img class="pet-hero-image" src="${image}" alt="${alt}" /><img class="pet-part pet-head" src="${image}" alt="" aria-hidden="true" /><img class="pet-part pet-paws" src="${image}" alt="" aria-hidden="true" /><img class="pet-part pet-feet" src="${image}" alt="" aria-hidden="true" /></div>${hasIdleVideo ? '<video class="pet-idle-animation" src="/assets/pets/actions/rabbit-idle.mp4" muted playsinline preload="auto" aria-hidden="true"></video>' : ''}<video class="pet-pet-animation" src="/assets/pets/actions/rabbit-pet.mp4" muted playsinline preload="auto" aria-hidden="true"></video><video class="pet-clean-animation" src="/assets/pets/actions/rabbit-bath.mp4" muted playsinline preload="auto" aria-hidden="true"></video><video class="pet-feed-animation" src="/assets/pets/actions/rabbit-feed.mp4" muted playsinline preload="auto" aria-hidden="true"></video><video class="pet-play-animation" src="/assets/pets/actions/rabbit-play.mp4" muted playsinline preload="auto" aria-hidden="true"></video><span class="pet-animation-layer" aria-hidden="true"></span></div>`; }
+function stopPetIdleAnimation() { clearInterval(state.petIdleTimer); clearTimeout(state.petIdlePauseTimer); state.petIdleTimer = null; state.petIdlePauseTimer = null; const video = $('.pet-idle-animation'); if (video instanceof HTMLVideoElement) { video.onended = null; video.oncanplay = null; video.onloadeddata = null; video.onerror = null; video.pause(); } }
+function startPetIdleAnimation() {
+  stopPetIdleAnimation(); const stage = $('.pet-stage'); const video = stage?.querySelector('.pet-idle-animation'); if (!(video instanceof HTMLVideoElement)) return;
+  let playCount = 0;
+  const markReady = () => { if (!stage.isConnected) return; stage.classList.add('pet-idle-ready'); stage.classList.remove('pet-idle-fallback'); };
+  const markFallback = () => { if (!stage.isConnected) return; stage.classList.remove('pet-idle-ready'); stage.classList.add('pet-idle-fallback'); video.pause(); };
+  video.oncanplay = markReady;
+  video.onloadeddata = markReady;
+  video.onerror = markFallback;
+  if (video.readyState >= 2) markReady();
+  const blocked = () => !stage.isConnected || stage.classList.contains('pet-anim-pet-svg') || stage.classList.contains('pet-anim-clean-svg') || stage.classList.contains('pet-anim-feed-svg') || stage.classList.contains('pet-anim-play-svg') || stage.classList.contains('pet-anim-pet');
+  const playCycle = () => { if (blocked()) return; video.currentTime = 0; video.play().catch(() => { markFallback(); }); };
+  video.loop = false;
+  video.onended = () => {
+    if (blocked()) return;
+    playCount += 1;
+    if (playCount < 3) { playCycle(); return; }
+    playCount = 0;
+    state.petIdlePauseTimer = setTimeout(() => { state.petIdlePauseTimer = null; playCycle(); }, 5000);
+  };
+  playCycle();
+}
+function playPetAnimation(type) {
+  const stage = $('.pet-stage'); if (!stage) return;
+  stopPetIdleAnimation();
+  const animationTypes = ['pet', 'feed', 'clean', 'play']; stage.classList.remove(...animationTypes.map(name => `pet-anim-${name}`), 'pet-anim-pet-svg', 'pet-anim-clean-svg', 'pet-anim-feed-svg', 'pet-anim-play-svg');
+  const visuals = { pet: ['摸摸', '💗'], feed: ['进食', '🍎'], clean: ['清洁', '🪥'], play: ['玩耍', '✨'] };
+  const [label, visual] = visuals[type] || ['互动', '✨']; const layer = stage.querySelector('.pet-animation-layer');
+  if (layer) layer.innerHTML = `<span>${visual}</span><b>${label}</b>`;
+  const usesBunnyScene = stage.dataset.petSpecies === 'star_ring_bunny' && ['pet', 'clean', 'feed', 'play'].includes(type);
+  const sceneVideo = usesBunnyScene ? stage.querySelector(`.pet-${type}-animation`) : null;
+  $$('.pet-pet-animation,.pet-clean-animation,.pet-feed-animation,.pet-play-animation').forEach(video => { video.pause(); video.onended = null; video.currentTime = 0; });
+  if (sceneVideo instanceof HTMLVideoElement) { sceneVideo.pause(); sceneVideo.currentTime = 0; }
+  void stage.offsetWidth; const animationClass = usesBunnyScene ? `pet-anim-${type}-svg` : `pet-anim-${animationTypes.includes(type) ? type : 'pet'}`; stage.classList.add(animationClass); clearTimeout(state.petAnimationTimer);
+  let finished = false;
+  const finishAnimation = () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(state.petAnimationTimer);
+    if (sceneVideo instanceof HTMLVideoElement) { sceneVideo.onended = null; sceneVideo.pause(); sceneVideo.currentTime = 0; }
+    stage.classList.remove(...animationTypes.map(name => `pet-anim-${name}`), 'pet-anim-pet-svg', 'pet-anim-clean-svg', 'pet-anim-feed-svg', 'pet-anim-play-svg');
+    if (layer) layer.innerHTML = '';
+    startPetIdleAnimation();
+  };
+  if (sceneVideo instanceof HTMLVideoElement) {
+    sceneVideo.onended = () => { if (finished) return; sceneVideo.currentTime = 0; sceneVideo.play().catch(() => {}); };
+    requestAnimationFrame(() => sceneVideo.play().catch(() => {}));
+  }
+  state.petAnimationTimer = setTimeout(finishAnimation, 5000);
+}
+function renderPetAdoption(adoption) {
+  stopPetIdleAnimation();
+  const host = $('#student-pet-content');
+  if (!adoption?.enabled) { host.innerHTML = emptyState('paw-print', '萌宠模块尚未开启', '请让家长在学生管理中开启萌宠成长模块。'); return; }
+  host.innerHTML = `<section class="pet-onboarding"><div class="section-title"><div><p class="eyebrow">选择你的伙伴</p><h2>领养一只萌宠</h2></div></div><div class="pet-species-grid">${(adoption.species || []).map(species => { const available = species.available !== false && species.code === 'star_ring_bunny'; return `<button type="button" class="pet-species-card${available ? '' : ' is-coming-soon'}" data-pet-species="${escapeHtml(species.code)}" ${available ? '' : 'disabled'} aria-disabled="${available ? 'false' : 'true'}"><span class="pet-species-image"><img src="${escapeHtml(species.assetUrl)}" alt="${escapeHtml(species.name)}" />${available ? '' : '<em class="pet-coming-soon">敬请期待</em>'}</span><strong>${escapeHtml(species.name)}</strong><small>${escapeHtml(species.personality)}</small><span class="pet-species-line">${escapeHtml(species.personalityLine)}</span></button>`; }).join('')}</div><label class="pet-nickname-field">给它取个名字<input id="pet-adoption-nickname" maxlength="12" placeholder="例如：星星" /></label><p class="login-error" id="pet-adoption-error"></p><button class="primary-button" type="button" id="adopt-pet-button">确认领养</button></section>`;
+  state.activePetSpecies = adoption.species?.find(species => species.code === 'star_ring_bunny' && species.available !== false)?.code || '';
+  $$('.pet-species-card[data-pet-species]').forEach(button => button.classList.toggle('selected', button.dataset.petSpecies === state.activePetSpecies));
+}
+function renderStudentPet(data) {
+  state.petData = data;
+  const host = $('#student-pet-content'); if (!host) return;
+  if (!data?.enabled || !data.pet) { if (!data?.enabled) { renderPetAdoption({ enabled: false }); return; } renderPetAdoption(state.petAdoption || { enabled: true, species: [] }); return; }
+  const pet = data.pet; const progress = petExpProgress(pet); const daily = pet.daily || {};
+  host.innerHTML = `<div class="pet-dashboard-grid"><section class="pet-hero-card"><div class="pet-hero-visual"><span class="pet-level-chip">Lv.${pet.level}</span>${petStageMarkup(pet)}</div><div class="pet-hero-copy"><div class="pet-profile-heading"><div><p class="eyebrow">${escapeHtml(pet.species.name)}</p><h2>${escapeHtml(pet.nickname)}</h2></div><span class="pet-exp-today">今日 EXP <b>+${daily.earnedExp || 0}</b></span></div><p class="pet-personality">${escapeHtml(pet.species.personalityLine)}</p><div class="pet-exp"><div class="pet-exp-label"><span>成长经验</span><b>${progress.current} / ${progress.required} EXP</b></div><div class="pet-exp-track"><i class="pet-exp-fill" style="width:${progress.percent}%"></i></div></div></div></section><section class="pet-status-card"><div class="section-title"><div><p class="eyebrow">陪伴状态</p><h2>今日状态</h2></div><span>每日更新</span></div>${petStateBar('心情', daily.mood, 'mood')}${petStateBar('饱腹', daily.satiety, 'satiety')}${petStateBar('洁净', daily.cleanliness, 'cleanliness')}<div class="pet-inventory"><span>${icon('apple')}基础食物</span><b>${pet.inventory?.basicFood || 0} 份</b></div></section></div><section class="pet-interaction-section"><div class="section-title"><div><p class="eyebrow">陪伴一下</p><h2>每日互动</h2></div><span>可重复互动，状态达到 100 后不再增加</span></div><div class="pet-interaction-grid"><button class="secondary-button" data-pet-interaction="pet">${icon('heart')}摸摸 <small>+1 EXP</small></button><button class="secondary-button" data-pet-interaction="feed">${icon('utensils')}喂食 <small>+2 EXP</small></button><button class="secondary-button" data-pet-interaction="clean">${icon('sparkles')}清洁 <small>+1 EXP</small></button><button class="secondary-button" data-pet-interaction="play">${icon('gamepad-2')}玩耍 <small>+1 EXP</small></button></div></section>${data.ledger?.length ? `<section class="pet-ledger-section"><div class="section-title"><div><p class="eyebrow">最近发生</p><h2>成长记录</h2></div></div><div class="pet-ledger-list">${data.ledger.slice(0, 8).map(item => `<p><span>${escapeHtml(item.reason || item.sourceType)}</span><b>+${item.delta} EXP</b><small>${escapeHtml(item.businessDate)}</small></p>`).join('')}</div></section>` : ''}`;
+  const expFill = $('.pet-exp-fill');
+  if (expFill) expFill.style.setProperty('width', `${progress.percent}%`, 'important');
+  refreshIcons(); startPetIdleAnimation();
+}
+async function loadStudentPet() {
+  const [data, adoption] = await Promise.all([api('/api/student/pet', { silent: true }), api('/api/student/pets/adoption', { silent: true })]);
+  state.petAdoption = adoption;
+  if (data.pet?.pet || !data.pet?.enabled) renderStudentPet(data.pet); else renderPetAdoption(adoption);
+}
+async function openPetSettings(student) {
+  state.activePetStudentId = Number(student.id); $('#student-pet-settings-title').textContent = `${student.display_name}的萌宠设置`; $('#student-pet-settings-error').textContent = '';
+  try { const data = await api(`/api/parent/students/${student.id}/pet`, { silent: true }); $('#student-pet-enabled').checked = Boolean(data.pet?.enabled); $('#student-pet-daily-minutes').value = String(data.pet?.settings?.dailyMinutes ?? 10); $('#student-pet-settings-status').textContent = data.pet?.pet ? `当前萌宠：${data.pet.pet.nickname}（${data.pet.pet.species.name}）` : '尚未领养萌宠'; $('#student-pet-settings-dialog').showModal(); } catch (error) { showToast(error.message); }
 }
 function renderStudentTaskList() {
   $$('.student-task-tabs [data-student-task-filter]').forEach(button => button.classList.toggle('active', button.dataset.studentTaskFilter === state.studentTaskFilter));
@@ -399,7 +503,7 @@ function invalidateStudentDashboardCache() { state.studentDashboardCache.clear()
 async function loadStudent(date = state.studentDate || today(), { force = false, silent = false } = {}) {
   const selectedDate = date;
   state.studentDate = selectedDate;
-  if (state.student) renderStudentWeek({ taskDates: state.student.taskDates || [], incompleteTaskDates: state.student.incompleteTaskDates || [] });
+  if (state.student) renderStudentWeek({ weekTasks: state.student.weekTasks || {}, taskDateMarkers: state.student.taskDateMarkers || {} });
   const cached = state.studentDashboardCache.get(selectedDate);
   if (!force && cached && Date.now() - cached.cachedAt < 300000) { renderStudent(cached.data); return; }
   state.studentLoadController?.abort();
@@ -536,8 +640,7 @@ function renderTaskFilters() {
 function renderTaskWeek() {
   const labels = ['一', '二', '三', '四', '五', '六', '日'];
   const start = startOfWeek(state.taskDate);
-  const incompleteDates = new Set(state.incompleteTaskDates || []);
-  $('#task-week').innerHTML = labels.map((label, index) => { const date = addDays(start, index); const hasUnfinished = incompleteDates.has(date); return `<button type="button" data-task-date="${date}" class="${date === state.taskDate ? 'selected' : ''} ${date === today() ? 'today' : ''}"><small>周${label}</small><strong>${parseDate(date).getUTCDate()}</strong>${state.taskDates.includes(date) ? `<i class="${hasUnfinished ? 'unfinished' : ''}" aria-label="${hasUnfinished ? '有未完成任务' : '有任务'}"></i>` : ''}</button>`; }).join('');
+  $('#task-week').innerHTML = labels.map((label, index) => { const date = addDays(start, index); const marker = taskDateMarker(date, state.taskWeekTasks, state.taskDateMarkers); const labelText = { overdue: '有未完成任务', completed: '任务已全部完成', active: '有进行中的任务' }[marker]; return `<button type="button" data-task-date="${date}" class="${date === state.taskDate ? 'selected' : ''} ${date === today() ? 'today' : ''}"><small>周${label}</small><strong>${parseDate(date).getUTCDate()}</strong>${marker ? `<i class="date-marker ${marker}" aria-label="${labelText}"></i>` : ''}</button>`; }).join('');
   $('#task-list-date-label').textContent = `${shortDate(state.taskDate)}${state.taskDate === today() ? ' · 今日' : ''}`;
 }
 function parentTaskRow(task) {
@@ -551,6 +654,8 @@ function renderParentTasks(data) {
   state.parentTasks = data.tasks;
   state.taskDates = data.taskDates || [];
   state.incompleteTaskDates = data.incompleteTaskDates || [];
+  state.taskDateMarkers = data.taskDateMarkers || {};
+  state.taskWeekTasks = data.weekTasks || {};
   renderTaskWeek();
   $('#parent-task-list').innerHTML = data.tasks.map(parentTaskRow).join('') || emptyState('clipboard-list', '这一天还没有任务', '可以新建任务，或从模板批量分配。');
   refreshIcons();
@@ -632,6 +737,7 @@ function openTemplateEditor(template = null) {
   $('#template-detail').value = template?.detail || '';
   $('#template-duration').value = template?.duration || 15;
   $('#template-stars').value = template?.stars || 1;
+  $('#template-pet-exp-weight').value = String(template?.petExpWeight ?? 0);
   $('#template-feedback').value = template?.feedbackType || 'photo_or_video';
   $('#template-review').checked = template ? template.needsReview : true;
   $('#template-public').checked = template ? template.isPublic : false;
@@ -744,6 +850,7 @@ function openAssignmentEditor(task = null) {
   $('#assignment-detail').value = task?.detail || '';
   $('#assignment-duration').value = task?.duration || 15;
   $('#assignment-stars').value = task?.stars || 1;
+  $('#assignment-pet-exp-weight').value = String(task?.petExpWeight ?? 0);
   $('#assignment-feedback').value = task?.feedbackType || 'photo_or_video';
   $('#assignment-review').checked = task ? task.needsReview : true;
   const assignmentDate = task?.date || state.taskDate;
@@ -1067,7 +1174,7 @@ document.addEventListener('click', async event => {
   const dialogClose = event.target.closest('.modal-close, .dialog-cancel'); if (dialogClose) { dialogClose.closest('dialog')?.close(); return; }
   if (event.target.id === 'modal-close-done') { closeDialogs(); return; }
   if (event.target.closest('.feedback-option')) { $$('.feedback-option').forEach(item => item.classList.remove('selected')); event.target.closest('.feedback-option').classList.add('selected'); return; }
-  const studentNav = event.target.closest('[data-page]'); if (studentNav && state.user?.role === 'student') { const page = studentNav.dataset.page; setStudentPage(page); if (page === 'today') loadInBackground(`student-dashboard:${state.studentDate}`, () => loadStudent()); if (page === 'tasks') loadStudentTaskList(state.studentTaskFilter, { silent: true }).catch(error => showToast(error.message)); if (page === 'reading') loadStudentReading(state.readingDate || today().slice(0, 7)).catch(error => showToast(error.message)); if (page === 'reward-applications') loadRewardApplications().catch(error => showToast(error.message)); return; }
+  const studentNav = event.target.closest('[data-page]'); if (studentNav && state.user?.role === 'student') { const page = studentNav.dataset.page; setStudentPage(page); if (page === 'today') loadInBackground(`student-dashboard:${state.studentDate}`, () => loadStudent()); if (page === 'tasks') loadStudentTaskList(state.studentTaskFilter, { silent: true }).catch(error => showToast(error.message)); if (page === 'reading') loadStudentReading(state.readingDate || today().slice(0, 7)).catch(error => showToast(error.message)); if (page === 'reward-applications') loadRewardApplications().catch(error => showToast(error.message)); if (page === 'pet') loadStudentPet().catch(error => showToast(error.message)); return; }
   if (event.target.closest('[data-overview-task-link]') && state.user?.role !== 'student') { state.taskDate = today(); state.taskStudentId = state.dashboardStudentId || state.parent?.selectedStudentId || 'all'; setParentPage('assign'); try { await Promise.all([loadStudents(), loadCategories()]); renderTaskFilters(); renderTaskWeek(); await loadParentTasks({ force: true }); } catch (err) { showToast(err.message); } return; }
   const parentNav = event.target.closest('[data-parent-page]'); if (parentNav && state.user && state.user.role !== 'student') { const page = parentNav.dataset.parentPage; if ((page === 'parents' || page === 'categories') && state.user.role !== 'admin') return; setParentPage(page); closeParentMobileMenu(); loadParentPageData(page).catch(error => showToast(error.message)); return; }
   if (event.target.id === 'open-assignment') { openAssignmentEditor(); return; }
@@ -1160,6 +1267,10 @@ document.addEventListener('click', async event => {
   const studentActions = event.target.closest('[data-student-actions]'); if (studentActions) { const student = state.students.find(item => item.id === Number(studentActions.dataset.studentActions)); if (student) { closeStudentActionMenu(); openStudentActions(student, studentActions); } return; }
   if (event.target.closest('#edit-student-action')) { const studentId = Number($('#student-action-menu').dataset.studentId); const student = state.students.find(item => Number(item.id) === studentId); closeStudentActionMenu(); if (student) openStudentForm(student); else showToast('学生信息不存在或已解除关联'); return; }
   if (event.target.closest('#reset-student-password-action')) { closeStudentActionMenu(); $('#reset-student-password').value = ''; $('#reset-student-password-error').textContent = ''; $('#reset-student-password-dialog').showModal(); return; }
+  if (event.target.closest('#open-student-pet-settings-action')) { const studentId = Number($('#student-action-menu').dataset.studentId); const student = state.students.find(item => Number(item.id) === studentId); closeStudentActionMenu(); if (student) await openPetSettings(student); return; }
+  const petSpecies = event.target.closest('[data-pet-species]'); if (petSpecies) { if (petSpecies.disabled) return; state.activePetSpecies = petSpecies.dataset.petSpecies; $$('.pet-species-card[data-pet-species]').forEach(button => button.classList.toggle('selected', button === petSpecies)); return; }
+  if (event.target.closest('#adopt-pet-button')) { const error = $('#pet-adoption-error'); error.textContent = ''; const nickname = $('#pet-adoption-nickname').value.trim(); if (!nickname) { error.textContent = '请先给萌宠取个名字'; return; } try { const result = await api('/api/student/pets/adopt', { method: 'POST', body: JSON.stringify({ speciesCode: state.activePetSpecies, nickname }) }); renderStudentPet(result.pet); showToast('萌宠领养成功'); } catch (err) { error.textContent = err.message; } return; }
+  const petInteraction = event.target.closest('[data-pet-interaction]'); if (petInteraction) { const button = petInteraction; if (button.disabled) return; const interactionType = button.dataset.petInteraction; playPetAnimation(interactionType); button.disabled = true; try { const result = await api('/api/student/pet/interactions', { method: 'POST', body: JSON.stringify({ type: interactionType, requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}` }), silent: true }); renderStudentPet(result.pet); requestAnimationFrame(() => playPetAnimation(interactionType)); showToast(result.applied === false ? '该状态已达到 100' : '互动完成，经验已增加'); } catch (err) { showToast(err.message); button.disabled = false; } return; }
   if (event.target.closest('#link-student-parent-action')) { const student = state.students.find(item => item.id === state.activeStudentId); closeStudentActionMenu(); if (!student) return; fillParentSelect($('#link-parent-select'), student); if (!$('#link-parent-select').options.length) { showToast('没有可关联的家长账号'); return; } $('#link-parent-error').textContent = ''; $('#link-parent-dialog').showModal(); return; }
   const unlinkButton = event.target.closest('[data-unlink-parent]');
   if (unlinkButton) { state.activeStudentId = Number(unlinkButton.dataset.unlinkStudent); state.pendingUnlinkParentId = Number(unlinkButton.dataset.unlinkParent); const student = state.students.find(item => item.id === state.activeStudentId); const parent = student?.parents?.find(item => item.id === state.pendingUnlinkParentId); $('#unlink-student-description').textContent = `解除后，${parent?.displayName || '该家长'}将无法再查看${student?.display_name || '这名学生'}。只有超级管理员可以重新关联。`; $('#unlink-student-dialog').showModal(); return; }
@@ -1250,7 +1361,7 @@ $('#assignment-form').addEventListener('submit', async event => {
       existingResourceIds: state.taskResources.filter(resource => resource.existing).map(resource => resource.id),
       removeResource: true
     } : {};
-    const payload = { studentIds, studentId: studentIds[0], title: $('#assignment-title').value, detail: $('#assignment-detail').value, categoryId: Number($('#assignment-category').value), duration: Number($('#assignment-duration').value), stars: Number($('#assignment-stars').value), feedbackType: $('#assignment-feedback').value, needsReview: $('#assignment-review').checked, ...schedule, ...resourceChanges };
+    const payload = { studentIds, studentId: studentIds[0], title: $('#assignment-title').value, detail: $('#assignment-detail').value, categoryId: Number($('#assignment-category').value), duration: Number($('#assignment-duration').value), stars: Number($('#assignment-stars').value), petExpWeight: Number($('#assignment-pet-exp-weight').value), feedbackType: $('#assignment-feedback').value, needsReview: $('#assignment-review').checked, ...schedule, ...resourceChanges };
     const focusDate = schedule.date || schedule.startDate || today();
     if (state.editingTask?.isRecurring) { state.pendingTaskUpdate = { payload: { ...payload, scope: 'series' }, focusDate }; $('#task-series-update-dialog').showModal(); return; }
     await persistAssignment(payload, focusDate);
@@ -1272,7 +1383,7 @@ $('#template-form').addEventListener('submit', async event => {
     existingResourceIds: state.templateResources.filter(resource => resource.existing).map(resource => resource.id),
     removeResource: true
   } : {};
-  const payload = { title: $('#template-title').value, detail: $('#template-detail').value, categoryId: Number($('#template-category').value), duration: Number($('#template-duration').value), stars: Number($('#template-stars').value), feedbackType: $('#template-feedback').value, needsReview: $('#template-review').checked, isPublic: $('#template-public').checked, ...resourceChanges };
+  const payload = { title: $('#template-title').value, detail: $('#template-detail').value, categoryId: Number($('#template-category').value), duration: Number($('#template-duration').value), stars: Number($('#template-stars').value), petExpWeight: Number($('#template-pet-exp-weight').value), feedbackType: $('#template-feedback').value, needsReview: $('#template-review').checked, isPublic: $('#template-public').checked, ...resourceChanges };
   try {
     await api(editing ? `/api/parent/task-templates/${editing}` : '/api/parent/task-templates', { method: editing ? 'PATCH' : 'POST', body: JSON.stringify({ ...payload, ...(state.copyingTemplateId ? { copyFromTemplateId: state.copyingTemplateId } : {}) }) });
     form.reset(); state.editingTemplateId = null; state.copyingTemplateId = null; state.templateResources = []; state.removeTemplateResource = false; await loadTaskTemplates(); setParentPage('templates'); showToast(editing ? '任务模板已更新' : '任务模板已创建');
@@ -1431,6 +1542,11 @@ $('#reset-student-password-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget; const error = $('#reset-student-password-error'); error.textContent = '';
   try { await api(`/api/parent/students/${state.activeStudentId}/reset-password`, { method: 'POST', body: JSON.stringify({ password: $('#reset-student-password').value }) }); $('#reset-student-password-dialog').close(); form.reset(); showToast('学生密码已重置，请通知孩子使用新密码登录'); }
   catch (err) { error.textContent = err.message; }
+});
+$('#student-pet-settings-form').addEventListener('submit', async event => {
+  event.preventDefault(); const error = $('#student-pet-settings-error'); error.textContent = ''; const studentId = state.activePetStudentId; if (!studentId) return;
+  const button = event.currentTarget.querySelector('button[type="submit"]'); button.disabled = true;
+  try { const result = await api(`/api/parent/students/${studentId}/pet-settings`, { method: 'PUT', body: JSON.stringify({ enabled: $('#student-pet-enabled').checked, dailyMinutes: Number($('#student-pet-daily-minutes').value) }), silent: true }); $('#student-pet-settings-dialog').close(); const student = state.students.find(item => Number(item.id) === studentId); if (student) student.pet = result.pet; showToast('萌宠设置已保存'); } catch (err) { error.textContent = err.message; } finally { button.disabled = false; }
 });
 $('#reward-application-files').addEventListener('change', async event => { const files = [...event.target.files]; if (!files.length) return; if (state.rewardApplicationResources.length + files.length > 5) { $('#reward-application-error').textContent = '最多上传 5 张图片'; event.target.value = ''; return; } try { for (const file of files) state.rewardApplicationResources.push({ name: file.name, data: await prepareRewardApplicationImage(file), kind: 'image', mime: file.type, existing: false }); state.rewardApplicationResourcesChanged = true; renderRewardApplicationResources(); } catch (err) { $('#reward-application-error').textContent = err.message; event.target.value = ''; } });
 $('#reward-application-form').addEventListener('submit', async event => { event.preventDefault(); const error = $('#reward-application-error'); error.textContent = ''; const id = Number($('#reward-application-id').value || 0); const body = { categoryId: Number($('#reward-application-category').value), content: $('#reward-application-content').value, detail: $('#reward-application-detail').value, completedAt: $('#reward-application-date').value, requestedStars: Number($('#reward-application-stars').value) }; if (state.rewardApplicationResourcesChanged || !id) { body.resources = state.rewardApplicationResources.filter(resource => !resource.existing).map(({ name, data }) => ({ name, data })); body.existingResourceIds = state.rewardApplicationResources.filter(resource => resource.existing).map(resource => resource.id); } try { await api(id ? `/api/student/reward-applications/${id}` : '/api/student/reward-applications', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(body) }); $('#reward-application-dialog').close(); await loadRewardApplications(); showToast(id ? '奖励申请已更新' : '奖励申请已提交'); } catch (err) { error.textContent = err.message; } });

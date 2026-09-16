@@ -36,10 +36,11 @@ test('task templates enforce visibility, ownership, and batch assignment', async
   const p2 = (await login(parentTwoName, 'Parent2026B')).cookie;
   const categoryId = (await request('/api/parent/categories', { cookie: p1 })).body.categories[0].id;
   const createTemplate = (cookie, title, isPublic, extra = {}) => request('/api/parent/task-templates', { cookie, method: 'POST', body: JSON.stringify({ title, detail: `${title}要求`, categoryId, duration: 20, stars: 2, feedbackType: 'none', needsReview: false, isPublic, ...extra }) });
-  const shared = await createTemplate(p1, '公开阅读模板', true);
+  const shared = await createTemplate(p1, '公开阅读模板', true, { feedbackType: 'optional_photo_or_video' });
   const privateTemplate = await createTemplate(p1, '私有阅读模板', false);
   const own = await createTemplate(p2, '乙的私有模板', false, { stars: 27, resources: [{ name: '说明一.txt', data: 'data:text/plain;base64,QQ==' }, { name: '说明二.txt', data: 'data:text/plain;base64,Qg==' }] });
   assert.equal(shared.response.status, 201);
+  assert.equal(shared.body.template.feedbackType, 'optional_photo_or_video');
   assert.equal(privateTemplate.response.status, 201);
   assert.equal(own.response.status, 201);
   assert.equal(own.body.template.updatedAt, own.body.template.createdAt, 'new templates use their creation time as the first update time');
@@ -89,6 +90,7 @@ test('task templates enforce visibility, ownership, and batch assignment', async
   assert.equal(assignedOwn.stars, 27);
   assert.equal(assignedOwn.resourceCount, 2);
   assert.equal(assignedOwn.resourceName, '说明一.txt');
+  assert.equal(dayOne.body.tasks.find(task => task.title === '公开阅读模板').feedbackType, 'optional_photo_or_video', 'template assignment preserves the optional feedback requirement');
   const assignedDetail = await request(`/api/parent/tasks/${assignedOwn.id}`, { cookie: p2 });
   assert.deepEqual(assignedDetail.body.task.resources.map(resource => resource.name), ['说明一.txt', '说明二.txt']);
   assert.equal(dayTwo.body.tasks.length, 2);

@@ -40,7 +40,7 @@ const server = spawn(process.execPath, ['server.mjs'], {
 try {
   await waitForServer();
   await run(process.execPath, ['--test', 'tests/task-workflow.test.mjs'], { env: { ...process.env, TEST_BASE_URL: base, TEST_DATA_DIR: dataDir } });
-  await run(process.execPath, ['--test', 'tests/task-templates.test.mjs', 'tests/account-system.test.mjs', 'tests/storage-migration.test.mjs', 'tests/reading-checkin.test.mjs'], { env: { ...process.env, TEST_BASE_URL: base } });
+  await run(process.execPath, ['--test', 'tests/task-templates.test.mjs', 'tests/account-system.test.mjs', 'tests/storage-migration.test.mjs', 'tests/reading-checkin.test.mjs', 'tests/pet-growth.test.mjs'], { env: { ...process.env, TEST_BASE_URL: base } });
 } finally {
   if (server.exitCode === null) {
     server.kill('SIGTERM');

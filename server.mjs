@@ -444,6 +444,66 @@ function migrate() {
       checkin_order INTEGER NOT NULL DEFAULT 1,
       UNIQUE(plan_id, checkin_date, checkin_order)
     );
+    CREATE TABLE IF NOT EXISTS pet_species (
+      id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+      personality TEXT NOT NULL DEFAULT '', personality_line TEXT NOT NULL DEFAULT '',
+      asset_url TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active',
+      sort_order INTEGER NOT NULL DEFAULT 0, version TEXT NOT NULL DEFAULT 'v1', created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS student_pet_settings (
+      student_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      enabled INTEGER NOT NULL DEFAULT 0, enabled_at TEXT, daily_minutes INTEGER NOT NULL DEFAULT 10,
+      quiz_count INTEGER NOT NULL DEFAULT 3, subjects TEXT NOT NULL DEFAULT 'chinese,math,english',
+      sound_enabled INTEGER NOT NULL DEFAULT 1, reduced_motion INTEGER NOT NULL DEFAULT 0,
+      updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS student_pets (
+      id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      species_id INTEGER NOT NULL REFERENCES pet_species(id), nickname TEXT NOT NULL,
+      level INTEGER NOT NULL DEFAULT 1, total_exp INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'active', adopted_at TEXT NOT NULL,
+      UNIQUE(student_id, active)
+    );
+    CREATE TABLE IF NOT EXISTS pet_daily_states (
+      student_pet_id INTEGER NOT NULL REFERENCES student_pets(id) ON DELETE CASCADE,
+      business_date TEXT NOT NULL, mood INTEGER NOT NULL DEFAULT 60, satiety INTEGER NOT NULL DEFAULT 60,
+      cleanliness INTEGER NOT NULL DEFAULT 60, earned_exp INTEGER NOT NULL DEFAULT 0,
+      food_earned INTEGER NOT NULL DEFAULT 0, active_seconds INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(student_pet_id, business_date)
+    );
+    CREATE TABLE IF NOT EXISTS pet_exp_ledger (
+      id INTEGER PRIMARY KEY, student_pet_id INTEGER NOT NULL REFERENCES student_pets(id) ON DELETE CASCADE,
+      business_date TEXT NOT NULL, source_type TEXT NOT NULL, source_id TEXT NOT NULL,
+      rule_version TEXT NOT NULL, requested_delta INTEGER NOT NULL DEFAULT 0, delta INTEGER NOT NULL,
+      balance_after INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', rule_snapshot TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      UNIQUE(student_pet_id, source_type, source_id, rule_version)
+    );
+    CREATE TABLE IF NOT EXISTS pet_interactions (
+      id INTEGER PRIMARY KEY, student_pet_id INTEGER NOT NULL REFERENCES student_pets(id) ON DELETE CASCADE,
+      business_date TEXT NOT NULL, type TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE,
+      exp_delta INTEGER NOT NULL DEFAULT 0, inventory_delta INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+      UNIQUE(student_pet_id, business_date, type)
+    );
+    CREATE TABLE IF NOT EXISTS pet_inventory (
+      student_pet_id INTEGER NOT NULL REFERENCES student_pets(id) ON DELETE CASCADE,
+      item_code TEXT NOT NULL, quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity >= 0), updated_at TEXT NOT NULL,
+      PRIMARY KEY(student_pet_id, item_code)
+    );
+    CREATE TABLE IF NOT EXISTS pet_unlocks (
+      id INTEGER PRIMARY KEY, student_pet_id INTEGER NOT NULL REFERENCES student_pets(id) ON DELETE CASCADE,
+      content_type TEXT NOT NULL, content_code TEXT NOT NULL, condition_snapshot TEXT NOT NULL DEFAULT '{}', unlocked_at TEXT NOT NULL,
+      UNIQUE(student_pet_id, content_type, content_code)
+    );
+    CREATE TABLE IF NOT EXISTS pet_pending_events (
+      id INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, event_type TEXT NOT NULL,
+      source_id TEXT NOT NULL, student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      pet_id INTEGER REFERENCES student_pets(id) ON DELETE SET NULL, business_date TEXT NOT NULL,
+      payload TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, processed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pet_ledger_student_date ON pet_exp_ledger(student_pet_id, business_date, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_pet_pending_status ON pet_pending_events(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_tasks_student_date ON tasks(student_id, task_date);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_tasks_student_status_date ON tasks(student_id, status, task_date);
@@ -461,6 +521,24 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_reading_checkins_plan_date ON reading_checkins(plan_id, checkin_date);
     CREATE INDEX IF NOT EXISTS idx_reading_checkins_student_status ON reading_checkins(student_id, status, checkin_date DESC);
   `);
+  const petInteractionSchema = String(db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pet_interactions'").get()?.sql || '');
+  if (/UNIQUE\s*\(\s*student_pet_id\s*,\s*business_date\s*,\s*type\s*\)/i.test(petInteractionSchema)) {
+    db.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE pet_interactions_next (
+        id INTEGER PRIMARY KEY, student_pet_id INTEGER NOT NULL REFERENCES student_pets(id) ON DELETE CASCADE,
+        business_date TEXT NOT NULL, type TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE,
+        exp_delta INTEGER NOT NULL DEFAULT 0, inventory_delta INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+      );
+      INSERT INTO pet_interactions_next (id,student_pet_id,business_date,type,request_id,exp_delta,inventory_delta,created_at)
+        SELECT id,student_pet_id,business_date,type,request_id,exp_delta,inventory_delta,created_at FROM pet_interactions;
+      DROP TABLE pet_interactions;
+      ALTER TABLE pet_interactions_next RENAME TO pet_interactions;
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+  }
   const taskColumns = new Set(db.prepare('PRAGMA table_info(tasks)').all().map(column => column.name));
   const recoveryCodeColumns = new Set(db.prepare('PRAGMA table_info(recovery_codes)').all().map(column => column.name));
   const recoveryEmailSchema = String(db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recovery_emails'").get()?.sql || '');
@@ -498,6 +576,11 @@ function migrate() {
   if (!taskColumns.has('schedule_type')) db.exec("ALTER TABLE tasks ADD COLUMN schedule_type TEXT NOT NULL DEFAULT 'single'");
   if (!taskColumns.has('available_start_date')) db.exec("ALTER TABLE tasks ADD COLUMN available_start_date TEXT NOT NULL DEFAULT ''");
   if (!taskColumns.has('available_end_date')) db.exec("ALTER TABLE tasks ADD COLUMN available_end_date TEXT NOT NULL DEFAULT ''");
+  if (!taskColumns.has('pet_exp_weight_snapshot')) db.exec('ALTER TABLE tasks ADD COLUMN pet_exp_weight_snapshot INTEGER');
+  if (!taskColumns.has('submitted_active_pet_id')) db.exec('ALTER TABLE tasks ADD COLUMN submitted_active_pet_id INTEGER REFERENCES student_pets(id) ON DELETE SET NULL');
+  if (!taskColumns.has('pet_business_date')) db.exec('ALTER TABLE tasks ADD COLUMN pet_business_date TEXT');
+  const templateColumns = new Set(db.prepare('PRAGMA table_info(task_templates)').all().map(column => column.name));
+  if (!templateColumns.has('pet_exp_weight')) db.exec('ALTER TABLE task_templates ADD COLUMN pet_exp_weight INTEGER NOT NULL DEFAULT 1');
   const resourceColumns = new Set(db.prepare('PRAGMA table_info(task_resources)').all().map(column => column.name));
   const rewardColumns = new Set(db.prepare('PRAGMA table_info(rewards)').all().map(column => column.name));
   if (!rewardColumns.has('reading_checkin_id')) db.exec('ALTER TABLE rewards ADD COLUMN reading_checkin_id INTEGER REFERENCES reading_checkins(id) ON DELETE SET NULL');
@@ -530,6 +613,8 @@ function migrate() {
     } finally { db.exec('PRAGMA foreign_keys = ON'); }
   }
   if (!resourceColumns.has('url')) db.exec("ALTER TABLE task_resources ADD COLUMN url TEXT NOT NULL DEFAULT ''");
+  if (!readingCheckinColumns.has('submitted_active_pet_id')) db.exec('ALTER TABLE reading_checkins ADD COLUMN submitted_active_pet_id INTEGER REFERENCES student_pets(id) ON DELETE SET NULL');
+  if (!readingCheckinColumns.has('pet_business_date')) db.exec('ALTER TABLE reading_checkins ADD COLUMN pet_business_date TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_series ON tasks(series_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_recovery_codes_target_created ON recovery_codes(target_hash, created_at)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_student_availability ON tasks(student_id, schedule_type, available_start_date, available_end_date)');
@@ -559,6 +644,16 @@ function seed() {
   const count = db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
   if (count) return;
   db.prepare('INSERT INTO users (username, password_hash, role, display_name, avatar, must_change_password, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run('admin', hashPassword('admin@2026'), 'admin', '超级管理员', '管', 0, now());
+}
+
+function ensurePetSpecies() {
+  const species = [
+    ['star_ring_bunny', '星环兔', '元气、勇敢、探索', '今天也一起向前跳一小步吧！', 'assets/pets/concepts/star-ring-bunny-concept.png', 1],
+    ['cloud_cat', '云朵猫', '好奇、温柔、阅读', '我发现书里藏着好多星光。', 'assets/pets/concepts/cloud-cat-concept.png', 2],
+    ['warm_sun_red_panda', '暖阳小熊猫', '温暖、认真、陪伴', '慢慢来，认真完成每一件事。', 'assets/pets/concepts/warm-sun-red-panda-concept.png', 3]
+  ];
+  const insert = db.prepare("INSERT OR IGNORE INTO pet_species (code,name,personality,personality_line,asset_url,status,sort_order,version,created_at) VALUES (?,?,?,?,?,'active',?,?,?)");
+  for (const item of species) insert.run(...item, 'v1', now());
 }
 
 function ensureBuiltInAdmin() {
@@ -645,10 +740,104 @@ function taskJson(task, includeFeedback = false, includeResource = false) {
   const resourceCount = hasSummary ? Number(task.resource_count) : resources.length;
   const repeatWeekdays = String(task.repeat_weekdays || '').split(',').map(Number).filter(day => day >= 1 && day <= 7);
   const scheduleType = task.series_id ? 'repeat' : task.schedule_type || 'single';
-  const result = { id: task.id, studentId: task.student_id, title: task.title, category: task.category, icon: task.icon, color: task.category_color, detail: task.detail, date: task.task_date, duration: task.duration_minutes, stars: task.stars, feedbackType: task.feedback_type, needsReview: Boolean(task.needs_review), status: task.status, startedAt: task.started_at, draftUpdatedAt: task.draft_updated_at, submittedAt: task.submitted_at, encouragement: task.encouragement, studentName: task.student_name, studentAvatar: signStoredUrl(task.student_avatar), feedbackKind: task.feedback_kind || '', feedbackName: task.feedback_name || '', feedbackNote: task.feedback_note || '', hasFeedback: Boolean(task.feedback_url || task.feedback_data || task.feedback_note), hasResource: resourceCount > 0, resourceCount, resourceName: resource?.name || '', resourceMime: resource?.mime || '', resourceKind: resource?.kind || '', resources, scheduleType, isDateRange: scheduleType === 'range', availableStartDate: task.available_start_date || task.task_date, availableEndDate: task.available_end_date || task.task_date, isRecurring: Boolean(task.series_id), seriesId: task.series_id || '', repeatPattern: task.repeat_pattern || '', repeatWeekdays, seriesStartDate: task.series_start_date || '', seriesEndDate: task.series_end_date || '' };
+  const result = { id: task.id, studentId: task.student_id, title: task.title, category: task.category, icon: task.icon, color: task.category_color, detail: task.detail, date: task.task_date, duration: task.duration_minutes, stars: task.stars, feedbackType: task.feedback_type || 'photo_or_video', petExpWeight: Number(task.pet_exp_weight_snapshot ?? task.pet_exp_weight ?? 1), needsReview: Boolean(task.needs_review), status: task.status, startedAt: task.started_at, draftUpdatedAt: task.draft_updated_at, submittedAt: task.submitted_at, encouragement: task.encouragement, studentName: task.student_name, studentAvatar: signStoredUrl(task.student_avatar), feedbackKind: task.feedback_kind || '', feedbackName: task.feedback_name || '', feedbackNote: task.feedback_note || '', hasFeedback: Boolean(task.feedback_url || task.feedback_data || task.feedback_note), hasResource: resourceCount > 0, resourceCount, resourceName: resource?.name || '', resourceMime: resource?.mime || '', resourceKind: resource?.kind || '', resources, scheduleType, isDateRange: scheduleType === 'range', availableStartDate: task.available_start_date || task.task_date, availableEndDate: task.available_end_date || task.task_date, isRecurring: Boolean(task.series_id), seriesId: task.series_id || '', repeatPattern: task.repeat_pattern || '', repeatWeekdays, seriesStartDate: task.series_start_date || '', seriesEndDate: task.series_end_date || '' };
   if (includeFeedback) result.feedbackData = signStoredUrl(task.feedback_url || task.feedback_data || '');
   if (includeResource) result.resourceData = resource?.data || '';
   return result;
+}
+const PET_RULE_VERSION = 'pet-exp-v1';
+const PET_DAILY_EXP_LIMIT = 80;
+const PET_DAILY_FOOD_LIMIT = 5;
+const PET_INTERACTION_EXP = { pet: 1, feed: 2, clean: 1, play: 1 };
+const AVAILABLE_PET_SPECIES = new Set(['star_ring_bunny']);
+function petLevelForExp(totalExp) {
+  let level = 1; let remaining = Math.max(0, Number(totalExp) || 0);
+  while (level < 100) { const required = 100 + 20 * Math.floor((level - 1) / 10); if (remaining < required) break; remaining -= required; level += 1; }
+  return level;
+}
+function petSpeciesJson(species) { return species ? { code: species.code, name: species.name, personality: species.personality, personalityLine: species.personality_line, assetUrl: signStoredUrl(species.asset_url), sortOrder: Number(species.sort_order) } : null; }
+function ensurePetDailyState(petId, date) {
+  db.prepare('INSERT OR IGNORE INTO pet_daily_states (student_pet_id,business_date) VALUES (?,?)').run(petId, date);
+  return db.prepare('SELECT * FROM pet_daily_states WHERE student_pet_id = ? AND business_date = ?').get(petId, date);
+}
+function activePetForStudent(studentId) { return db.prepare(`SELECT student_pets.*, pet_species.code AS species_code, pet_species.name AS species_name, pet_species.personality, pet_species.personality_line, pet_species.asset_url
+  FROM student_pets JOIN pet_species ON pet_species.id = student_pets.species_id
+  WHERE student_pets.student_id = ? AND student_pets.active = 1 AND student_pets.status = 'active' LIMIT 1`).get(studentId); }
+function petOverview(studentId, includeLedger = false) {
+  const settings = db.prepare('SELECT * FROM student_pet_settings WHERE student_id = ?').get(studentId) || { student_id: studentId, enabled: 0, daily_minutes: 10, quiz_count: 3, subjects: 'chinese,math,english', sound_enabled: 1, reduced_motion: 0 };
+  const pet = activePetForStudent(studentId);
+  const date = businessDate();
+  const daily = pet ? ensurePetDailyState(pet.id, date) : null;
+  const ledger = includeLedger && pet ? db.prepare('SELECT id, business_date, source_type, source_id, requested_delta, delta, balance_after, reason, rule_snapshot, created_at FROM pet_exp_ledger WHERE student_pet_id = ? ORDER BY id DESC LIMIT 50').all(pet.id) : [];
+  return { enabled: Boolean(settings.enabled), enabledAt: settings.enabled_at || null, settings: { dailyMinutes: Number(settings.daily_minutes || 10), soundEnabled: Boolean(settings.sound_enabled), reducedMotion: Boolean(settings.reduced_motion) }, pet: pet ? { id: pet.id, nickname: pet.nickname, level: Number(pet.level), totalExp: Number(pet.total_exp), species: petSpeciesJson({ code: pet.species_code, name: pet.species_name, personality: pet.personality, personality_line: pet.personality_line, asset_url: pet.asset_url, sort_order: 0 }), daily: { mood: Number(daily.mood), satiety: Number(daily.satiety), cleanliness: Number(daily.cleanliness), earnedExp: Number(daily.earned_exp), foodEarned: Number(daily.food_earned), activeSeconds: Number(daily.active_seconds) }, inventory: { basicFood: Number(db.prepare("SELECT quantity FROM pet_inventory WHERE student_pet_id = ? AND item_code = 'basic_food'").get(pet.id)?.quantity || 0) } } : null, ledger: ledger.map(item => ({ id: item.id, businessDate: item.business_date, sourceType: item.source_type, sourceId: item.source_id, requestedDelta: Number(item.requested_delta), delta: Number(item.delta), balanceAfter: Number(item.balance_after), reason: item.reason, ruleSnapshot: item.rule_snapshot, createdAt: item.created_at })) };
+}
+function unlockPetLevels(petId, level, timestamp) {
+  const insert = db.prepare('INSERT OR IGNORE INTO pet_unlocks (student_pet_id,content_type,content_code,condition_snapshot,unlocked_at) VALUES (?,?,?,?,?)');
+  for (let unlockLevel = 5; unlockLevel <= level; unlockLevel += 5) insert.run(petId, 'level_reward', `level-${unlockLevel}`, JSON.stringify({ level: unlockLevel, ruleVersion: PET_RULE_VERSION }), timestamp);
+}
+function settlePetEvent(event) {
+  const pet = event.petId ? db.prepare("SELECT * FROM student_pets WHERE id = ? AND student_id = ? AND status = 'active'").get(event.petId, event.studentId) : null;
+  const settings = db.prepare('SELECT enabled, enabled_at FROM student_pet_settings WHERE student_id = ?').get(event.studentId);
+  if (!pet || !settings?.enabled || (settings.enabled_at && event.occurredAt < settings.enabled_at)) return { delta: 0, inserted: false, skipped: true };
+  const sourceType = event.sourceType;
+  const existing = db.prepare('SELECT delta FROM pet_exp_ledger WHERE student_pet_id = ? AND source_type = ? AND source_id = ? AND rule_version = ?').get(pet.id, sourceType, event.sourceId, PET_RULE_VERSION);
+  if (existing) return { delta: Number(existing.delta), inserted: false, skipped: false };
+  const date = event.businessDate || businessDate();
+  ensurePetDailyState(pet.id, date);
+  const sourceCap = sourceType === 'task_complete' ? 50 : sourceType === 'reading_complete' ? 5 : sourceType === 'daily_completion' ? 15 : sourceType === 'interaction' ? 5 : PET_DAILY_EXP_LIMIT;
+  const sourceUsed = Number(db.prepare('SELECT COALESCE(SUM(delta),0) AS total FROM pet_exp_ledger WHERE student_pet_id = ? AND business_date = ? AND source_type = ?').get(pet.id, date, sourceType)?.total || 0);
+  const studentDayUsed = Number(db.prepare(`SELECT COALESCE(SUM(pet_exp_ledger.delta),0) AS total FROM pet_exp_ledger JOIN student_pets ON student_pets.id = pet_exp_ledger.student_pet_id WHERE student_pets.student_id = ? AND pet_exp_ledger.business_date = ?`).get(event.studentId, date)?.total || 0);
+  const requested = Math.max(0, Number(event.requestedDelta) || 0);
+  const delta = Math.max(0, Math.min(requested, Math.max(0, sourceCap - sourceUsed), Math.max(0, PET_DAILY_EXP_LIMIT - studentDayUsed)));
+  const timestamp = event.occurredAt || now();
+  const balanceAfter = Number(pet.total_exp || 0) + delta;
+  const snapshot = JSON.stringify({ theoretical: requested, sourceCap, sourceUsed, studentDayUsed, final: delta, ruleVersion: PET_RULE_VERSION });
+  db.prepare('INSERT INTO pet_exp_ledger (student_pet_id,business_date,source_type,source_id,rule_version,requested_delta,delta,balance_after,reason,rule_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(pet.id, date, sourceType, event.sourceId, PET_RULE_VERSION, requested, delta, balanceAfter, delta < requested ? '已达到当日成长能量上限' : (event.reason || ''), snapshot, timestamp);
+  const level = petLevelForExp(balanceAfter);
+  db.prepare('UPDATE student_pets SET total_exp = ?, level = ? WHERE id = ?').run(balanceAfter, level, pet.id);
+  db.prepare('UPDATE pet_daily_states SET earned_exp = earned_exp + ? WHERE student_pet_id = ? AND business_date = ?').run(delta, pet.id, date);
+  unlockPetLevels(pet.id, level, timestamp);
+  return { delta, inserted: true, skipped: false };
+}
+function grantPetFood(petId, date, timestamp) {
+  const daily = ensurePetDailyState(petId, date);
+  if (Number(daily.food_earned || 0) >= PET_DAILY_FOOD_LIMIT) return false;
+  db.prepare('UPDATE pet_daily_states SET food_earned = food_earned + 1 WHERE student_pet_id = ? AND business_date = ?').run(petId, date);
+  db.prepare("INSERT INTO pet_inventory (student_pet_id,item_code,quantity,updated_at) VALUES (?, 'basic_food', 1, ?) ON CONFLICT(student_pet_id,item_code) DO UPDATE SET quantity = quantity + 1, updated_at = excluded.updated_at").run(petId, timestamp);
+  return true;
+}
+function publishPetEvent(event) {
+  if (!event?.studentId || !event?.sourceId) return;
+  const eventId = event.eventId || hashToken(`${event.eventType}:${event.studentId}:${event.sourceId}`);
+  const timestamp = event.occurredAt || now();
+  db.prepare('INSERT OR IGNORE INTO pet_pending_events (event_id,event_type,source_id,student_id,pet_id,business_date,payload,created_at) VALUES (?,?,?,?,?,?,?,?)').run(eventId, event.eventType, event.sourceId, event.studentId, event.petId || null, event.businessDate || businessDate(), JSON.stringify(event), timestamp);
+  const pending = db.prepare('SELECT * FROM pet_pending_events WHERE event_id = ?').get(eventId);
+  if (!pending || pending.status === 'done') return;
+  try {
+    db.exec('BEGIN');
+    const result = settlePetEvent({ ...event, eventId, occurredAt: timestamp });
+    if (event.eventType === 'TASK_COMPLETED' && event.petId) grantPetFood(event.petId, event.businessDate || businessDate(), timestamp);
+    if (event.eventType === 'INTERACTION' && event.interactionId) db.prepare('UPDATE pet_interactions SET exp_delta = ? WHERE id = ?').run(result.delta, event.interactionId);
+    db.prepare("UPDATE pet_pending_events SET status='done', attempts=attempts+1, last_error='', processed_at=? WHERE event_id=?").run(timestamp, eventId);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    db.prepare("UPDATE pet_pending_events SET status='failed', attempts=attempts+1, last_error=? WHERE event_id=?").run(error.message, eventId);
+    console.error('萌宠经验结算失败：', error.message);
+  }
+}
+function reconcileDailyPetCompletion(studentId, date) {
+  const rows = db.prepare(`SELECT status, COALESCE(pet_exp_weight_snapshot, 1) AS weight FROM tasks
+    WHERE student_id = ? AND is_demo = 0 AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date = ?))`).all(studentId, date, date, date);
+  const totalWeight = rows.reduce((sum, task) => sum + Math.max(0, Number(task.weight) || 0), 0);
+  const completedWeight = rows.filter(task => task.status === 'completed').reduce((sum, task) => sum + Math.max(0, Number(task.weight) || 0), 0);
+  if (!totalWeight) return;
+  const pet = activePetForStudent(studentId);
+  if (!pet) return;
+  for (const threshold of [50, 80, 100]) {
+    if (completedWeight * 100 < totalWeight * threshold) continue;
+    publishPetEvent({ eventType: 'DAILY_COMPLETION', sourceType: 'daily_completion', sourceId: `${date}:${threshold}`, studentId, petId: pet.id, businessDate: date, requestedDelta: 5, occurredAt: now(), reason: `当日任务完成度达到 ${threshold}%` });
+  }
 }
 function taskVisibleOn(task, date) {
   return task.isDateRange ? task.availableStartDate <= date && task.availableEndDate >= date : task.date === date;
@@ -662,6 +851,28 @@ function overdueUnfinishedTaskDates(weekTasks, currentDate = businessDate()) {
     return date < currentDate;
   })).map(([date]) => date);
 }
+function taskIsCompleted(task) {
+  return String(task?.status || '').toLowerCase() === 'completed';
+}
+function taskIsOverdueOn(task, date, currentDate = businessDate()) {
+  if (taskIsCompleted(task)) return false;
+  if (task?.isDateRange || task?.schedule_type === 'range') {
+    const endDate = task.availableEndDate || task.available_end_date || task.task_date;
+    return date === endDate && endDate < currentDate;
+  }
+  return date < currentDate;
+}
+function taskDateMarkMap(weekTasks, currentDate = businessDate()) {
+  return Object.fromEntries(Object.entries(weekTasks).flatMap(([date, dayTasks]) => {
+    if (!dayTasks.length) return [];
+    if (dayTasks.every(taskIsCompleted)) return [[date, 'completed']];
+    if (dayTasks.some(task => taskIsOverdueOn(task, date, currentDate))) return [[date, 'overdue']];
+    // A past date covered only by an unfinished continuous task is not overdue
+    // until its end date. Today and future dates use the active marker.
+    if (date >= currentDate) return [[date, 'active']];
+    return [];
+  }));
+}
 function taskTemplateJson(template, includeResource = false) {
   const resources = linkedResources('template', template.id, template.resource_id, includeResource);
   const resource = resources[0];
@@ -670,7 +881,7 @@ function taskTemplateJson(template, includeResource = false) {
     title: template.title, categoryId: template.category_id, category: template.category_name,
     icon: template.category_icon, color: template.category_color, detail: template.detail,
     duration: template.duration_minutes, stars: template.stars, feedbackType: template.feedback_type,
-    needsReview: Boolean(template.needs_review), isPublic: Boolean(template.is_public),
+    needsReview: Boolean(template.needs_review), petExpWeight: Number(template.pet_exp_weight ?? 1), isPublic: Boolean(template.is_public),
     isOwner: Boolean(template.is_owner), hasResource: resources.length > 0, resourceCount: resources.length,
     resourceName: resource?.name || '', resourceMime: resource?.mime || '',
     resourceKind: resource?.kind || '', resources, createdAt: template.created_at, updatedAt: template.updated_at
@@ -812,9 +1023,10 @@ function parentList() {
 
 migrate();
 seed();
+ensurePetSpecies();
 ensureBuiltInAdmin();
 
-const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.avif': 'image/avif', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.weba': 'audio/webm', '.mp4': 'video/mp4', '.webm': 'video/webm', '.pdf': 'application/pdf', '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8' };
+const mimeTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.avif': 'image/avif', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.weba': 'audio/webm', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm', '.pdf': 'application/pdf', '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8' };
 function serveStatic(req, res, pathname) {
   const uploaded = localUploadPath(dataDir, pathname);
   if (uploaded) {
@@ -955,6 +1167,86 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/auth/me') { const user = requireUser(req, res); if (user) json(res, 200, { user: publicUser(user) }); return; }
+    if (req.method === 'GET' && url.pathname === '/api/student/pet') {
+      const user = requireUser(req, res); if (!user || user.role !== 'student') return;
+      json(res, 200, { pet: petOverview(user.id, false) }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/student/pets/adoption') {
+      const user = requireUser(req, res); if (!user || user.role !== 'student') return;
+      const settings = db.prepare('SELECT enabled FROM student_pet_settings WHERE student_id = ?').get(user.id);
+      const current = activePetForStudent(user.id);
+      const species = db.prepare("SELECT * FROM pet_species WHERE status = 'active' ORDER BY sort_order, id").all().map(item => ({ ...petSpeciesJson(item), available: AVAILABLE_PET_SPECIES.has(item.code) }));
+      json(res, 200, { enabled: Boolean(settings?.enabled), adopted: Boolean(current), species }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/student/pets/adopt') {
+      const user = requireUser(req, res); if (!user || user.role !== 'student') return;
+      const settings = db.prepare('SELECT enabled FROM student_pet_settings WHERE student_id = ?').get(user.id);
+      if (!settings?.enabled) { bad(res, 409, '请先让家长开启萌宠模块'); return; }
+      if (activePetForStudent(user.id)) { bad(res, 409, '你已经领养过萌宠了'); return; }
+      const body = await readBody(req); const speciesCode = clean(body.speciesCode, 40); const nickname = clean(body.nickname, 12);
+      const species = db.prepare("SELECT * FROM pet_species WHERE code = ? AND status = 'active'").get(speciesCode);
+      if (!species) { bad(res, 400, '请选择有效的萌宠'); return; }
+      if (!AVAILABLE_PET_SPECIES.has(speciesCode)) { bad(res, 409, '该萌宠暂未开放，敬请期待'); return; }
+      if (!nickname || Array.from(nickname).length < 1 || Array.from(nickname).length > 12 || /https?:\/\//i.test(nickname)) { bad(res, 400, '昵称需为 1 至 12 个字符'); return; }
+      const timestamp = now(); db.exec('BEGIN');
+      try {
+        const result = db.prepare('INSERT INTO student_pets (student_id,species_id,nickname,level,total_exp,active,status,adopted_at) VALUES (?,?,?,1,0,1,\'active\',?)').run(user.id, species.id, nickname, timestamp);
+        const petId = Number(result.lastInsertRowid);
+        ensurePetDailyState(petId, businessDate());
+        db.prepare("INSERT INTO pet_inventory (student_pet_id,item_code,quantity,updated_at) VALUES (?, 'basic_food', 0, ?)").run(petId, timestamp);
+        db.prepare('INSERT OR IGNORE INTO pet_unlocks (student_pet_id,content_type,content_code,condition_snapshot,unlocked_at) VALUES (?, \'scene\', \'star-home\', ?, ?)').run(petId, JSON.stringify({ condition: 'adoption' }), timestamp);
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      json(res, 201, { pet: petOverview(user.id, false) }); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/student/pet/interactions') {
+      const user = requireUser(req, res); if (!user || user.role !== 'student') return;
+      const overview = petOverview(user.id, false); const pet = activePetForStudent(user.id);
+      if (!overview.enabled || !pet) { bad(res, 409, '请先开启并领养萌宠'); return; }
+      const body = await readBody(req); const type = clean(body.type, 12); const requestId = clean(body.requestId, 100); const supported = Object.keys(PET_INTERACTION_EXP);
+      if (!supported.includes(type) || !requestId) { bad(res, 400, '互动参数不正确'); return; }
+      const date = businessDate(); const daily = ensurePetDailyState(pet.id, date);
+      const changes = { pet: ['mood', 10], feed: ['satiety', 20], clean: ['cleanliness', 20], play: ['mood', 20] }[type];
+      if (Number(daily[changes[0]] || 0) >= 100) { json(res, 200, { alreadyDone: false, applied: false, earnedExp: 0, message: '该状态已达到 100，上限后不会继续增加', pet: petOverview(user.id, false) }); return; }
+      if (type === 'feed' && Number(db.prepare("SELECT quantity FROM pet_inventory WHERE student_pet_id = ? AND item_code = 'basic_food'").get(pet.id)?.quantity || 0) < 1) { bad(res, 409, '今天没有可用的基础食物'); return; }
+      const timestamp = now(); db.exec('BEGIN'); let interactionId;
+      try {
+        db.prepare(`UPDATE pet_daily_states SET ${changes[0]} = MIN(100, ${changes[0]} + ?) WHERE student_pet_id = ? AND business_date = ?`).run(changes[1], pet.id, date);
+        if (type === 'feed') db.prepare("UPDATE pet_inventory SET quantity = quantity - 1, updated_at = ? WHERE student_pet_id = ? AND item_code = 'basic_food' AND quantity > 0").run(timestamp, pet.id);
+        interactionId = Number(db.prepare('INSERT INTO pet_interactions (student_pet_id,business_date,type,request_id,exp_delta,inventory_delta,created_at) VALUES (?,?,?,?,?,?,?)').run(pet.id, date, type, requestId, 0, type === 'feed' ? -1 : 0, timestamp).lastInsertRowid);
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      publishPetEvent({ eventType: 'INTERACTION', sourceType: 'interaction', sourceId: `${date}:${type}:${interactionId}`, interactionId, studentId: user.id, petId: pet.id, businessDate: date, requestedDelta: PET_INTERACTION_EXP[type], occurredAt: timestamp, reason: `完成${type === 'pet' ? '摸摸' : type === 'feed' ? '喂食' : type === 'clean' ? '清洁' : '玩耍'}` });
+      json(res, 200, { alreadyDone: false, applied: true, pet: petOverview(user.id, false) }); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/student/pet/growth') {
+      const user = requireUser(req, res); if (!user || user.role !== 'student') return;
+      json(res, 200, { pet: petOverview(user.id, true) }); return;
+    }
+    if (req.method === 'GET' && /^\/api\/parent\/students\/\d+\/pet$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const studentId = Number(url.pathname.split('/')[4]); if (!canManageStudent(user, studentId)) { bad(res, 403, '无权查看该学生萌宠'); return; }
+      json(res, 200, { pet: petOverview(studentId, false) }); return;
+    }
+    if (req.method === 'PUT' && /^\/api\/parent\/students\/\d+\/pet-settings$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const studentId = Number(url.pathname.split('/')[4]); if (!canManageStudent(user, studentId)) { bad(res, 403, '无权设置该学生萌宠'); return; }
+      const body = await readBody(req); if (typeof body.enabled !== 'boolean') { bad(res, 400, '萌宠模块状态参数不正确'); return; }
+      const dailyMinutes = Number(body.dailyMinutes ?? 10); if (![0, 5, 10, 15].includes(dailyMinutes)) { bad(res, 400, '互动时长设置不正确'); return; }
+      const current = db.prepare('SELECT enabled_at FROM student_pet_settings WHERE student_id = ?').get(studentId); const timestamp = now();
+      db.prepare(`INSERT INTO student_pet_settings (student_id,enabled,enabled_at,daily_minutes,sound_enabled,reduced_motion,updated_by,updated_at) VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(student_id) DO UPDATE SET enabled=excluded.enabled, enabled_at=CASE WHEN excluded.enabled=1 AND student_pet_settings.enabled_at IS NULL THEN excluded.enabled_at ELSE student_pet_settings.enabled_at END, daily_minutes=excluded.daily_minutes, sound_enabled=excluded.sound_enabled, reduced_motion=excluded.reduced_motion, updated_by=excluded.updated_by, updated_at=excluded.updated_at`).run(studentId, body.enabled ? 1 : 0, body.enabled && !current?.enabled_at ? timestamp : current?.enabled_at || null, dailyMinutes, body.soundEnabled === false ? 0 : 1, body.reducedMotion === true ? 1 : 0, user.id, timestamp);
+      json(res, 200, { pet: petOverview(studentId, false) }); return;
+    }
+    if (req.method === 'GET' && /^\/api\/parent\/students\/\d+\/pet-ledger$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const studentId = Number(url.pathname.split('/')[4]); if (!canManageStudent(user, studentId)) { bad(res, 403, '无权查看该学生成长流水'); return; }
+      const pet = activePetForStudent(studentId); if (!pet) { json(res, 200, { ledger: [] }); return; }
+      const sourceType = clean(url.searchParams.get('sourceType'), 30); const conditions = ['student_pet_id = ?']; const params = [pet.id];
+      if (sourceType) { conditions.push('source_type = ?'); params.push(sourceType); }
+      const ledger = db.prepare(`SELECT id,business_date,source_type,source_id,requested_delta,delta,balance_after,reason,rule_snapshot,created_at FROM pet_exp_ledger WHERE ${conditions.join(' AND ')} ORDER BY id DESC LIMIT 100`).all(...params);
+      json(res, 200, { ledger: ledger.map(item => ({ id: item.id, businessDate: item.business_date, sourceType: item.source_type, sourceId: item.source_id, requestedDelta: Number(item.requested_delta), delta: Number(item.delta), balanceAfter: Number(item.balance_after), reason: item.reason, ruleSnapshot: item.rule_snapshot, createdAt: item.created_at })) }); return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/student/dashboard') {
       const user = requireUser(req, res); if (!user) return; if (user.role !== 'student') { bad(res, 403, '学生账号专属接口'); return; }
       const date = clean(url.searchParams.get('date') || businessDate(), 10);
@@ -965,6 +1257,7 @@ const server = createServer(async (req, res) => {
       const tasks = weekTasks[date] || [];
       const taskDates = Object.entries(weekTasks).filter(([, dayTasks]) => dayTasks.length).map(([day]) => day);
       const incompleteTaskDates = overdueUnfinishedTaskDates(weekTasks);
+      const taskDateMarkers = taskDateMarkMap(weekTasks);
       const previousWeekDate = new Date(`${week.start}T12:00:00Z`); previousWeekDate.setUTCDate(previousWeekDate.getUTCDate() - 7);
       const previousWeek = weekRange(previousWeekDate.toISOString().slice(0, 10));
       const previousWeekRows = db.prepare(`SELECT tasks.* FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0`).all(user.id, previousWeek.end, previousWeek.start, previousWeek.start, previousWeek.end);
@@ -976,7 +1269,7 @@ const server = createServer(async (req, res) => {
       }).length;
       const rewards = db.prepare('SELECT rewards.*, tasks.title FROM rewards LEFT JOIN tasks ON tasks.id = rewards.task_id WHERE rewards.student_id = ? AND (rewards.task_id IS NULL OR tasks.is_demo = 0) ORDER BY rewards.id DESC LIMIT 10').all(user.id);
       const totalStars = db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(user.id).total;
-      json(res, 200, { date, student: publicUser(user), tasks, taskDates, incompleteTaskDates, previousWeekUnfinishedCount, weekTasks, rewards, growth: rewardBreakdown(totalStars) });
+      json(res, 200, { date, student: publicUser(user), tasks, taskDates, incompleteTaskDates, taskDateMarkers, previousWeekUnfinishedCount, weekTasks, rewards, growth: rewardBreakdown(totalStars) });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/student/tasks') {
@@ -1100,6 +1393,9 @@ const server = createServer(async (req, res) => {
       const feedbackName = clean(body.feedbackName, 120);
       const feedback = await feedbackValue(body.feedbackData, task, feedbackName);
       const feedbackNote = clean(body.feedbackNote, 300);
+      const submissionPet = activePetForStudent(user.id);
+      const petId = task.submitted_active_pet_id || submissionPet?.id || null;
+      const petDate = task.pet_business_date || businessDate();
       if (body.feedbackData && !feedback) { bad(res, 400, '反馈文件格式不正确或超过 4 MB'); return; }
       if (!['none', 'optional_photo_or_video'].includes(task.feedback_type)) {
         if (!feedback) { bad(res, 400, '请按任务要求上传学习反馈，文件最大 4 MB'); return; }
@@ -1107,13 +1403,17 @@ const server = createServer(async (req, res) => {
         if (task.feedback_type === 'video' && feedback.kind !== 'video') { bad(res, 400, '该任务需要上传视频反馈'); return; }
       }
       try {
-        db.prepare("UPDATE tasks SET status = ?, submitted_at = ?, feedback_kind = ?, feedback_data = '', feedback_url = ?, feedback_name = ?, feedback_note = ? WHERE id = ?").run(task.needs_review ? 'pending_review' : 'completed', now(), feedback?.kind || '', feedback?.url || '', feedbackName, feedbackNote, task.id);
+        db.prepare("UPDATE tasks SET status = ?, submitted_at = ?, feedback_kind = ?, feedback_data = '', feedback_url = ?, feedback_name = ?, feedback_note = ?, submitted_active_pet_id = COALESCE(submitted_active_pet_id, ?), pet_business_date = COALESCE(pet_business_date, ?) WHERE id = ?").run(task.needs_review ? 'pending_review' : 'completed', now(), feedback?.kind || '', feedback?.url || '', feedbackName, feedbackNote, petId, petDate, task.id);
       } catch (error) {
         if (feedback?.uploadedUrl) await deleteStoredUrl(feedback.uploadedUrl, { dataDir }).catch(() => {});
         throw error;
       }
       if (task.feedback_url && task.feedback_url !== feedback?.url) deleteStoredUrl(task.feedback_url, { dataDir }).catch(error => console.error('清理旧反馈文件失败：', error.message));
-      if (!task.needs_review) db.prepare('INSERT INTO rewards (student_id, task_id, stars, message, created_at) VALUES (?, ?, ?, ?, ?)').run(user.id, task.id, task.stars, '完成得很棒！', now());
+      if (!task.needs_review) {
+        db.prepare('INSERT INTO rewards (student_id, task_id, stars, message, created_at) VALUES (?, ?, ?, ?, ?)').run(user.id, task.id, task.stars, '完成得很棒！', now());
+        publishPetEvent({ eventType: 'TASK_COMPLETED', sourceType: 'task_complete', sourceId: String(task.id), studentId: user.id, petId, businessDate: petDate, requestedDelta: 10 * Math.max(0, Number(task.pet_exp_weight_snapshot ?? 1) || 0), occurredAt: now(), reason: `完成任务：${task.title}` });
+        reconcileDailyPetCompletion(user.id, petDate);
+      }
       json(res, 200, { task: taskJson(db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id)) });
       return;
     }
@@ -1416,12 +1716,14 @@ const server = createServer(async (req, res) => {
       if (plan.feedback_type === 'photo' && feedback.kind && feedback.kind !== 'image') { bad(res, 400, '该计划仅支持图片反馈'); return; }
       if (plan.feedback_type === 'video' && feedback.kind && feedback.kind !== 'video') { bad(res, 400, '该计划仅支持视频反馈'); return; }
       const submittedAt = now(); const status = plan.needs_review ? 'pending_review' : 'completed';
+      const submissionPet = activePetForStudent(user.id); const petId = existing?.submitted_active_pet_id || submissionPet?.id || null;
       db.exec('BEGIN'); let id; try {
-        if (existing) { db.prepare('UPDATE reading_checkins SET start_page=?, end_page=?, pages_read=?, reflection=?, feedback_kind=?, feedback_url=?, feedback_name=?, status=?, submitted_at=?, parent_message=\'\', awarded_stars=?, updated_at=? WHERE id=?').run(startPage, endPage, endPage - startPage + 1, reflection, feedback.kind, feedback.url, clean(body.feedbackName, 120), status, submittedAt, plan.needs_review ? null : plan.stars, submittedAt, existing.id); id = existing.id; }
-        else { id = Number(db.prepare('INSERT INTO reading_checkins (plan_id, student_id, checkin_date, start_page, end_page, pages_read, reflection, feedback_kind, feedback_url, feedback_name, status, submitted_at, awarded_stars, created_at, updated_at, checkin_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(planId, user.id, checkinDate, startPage, endPage, endPage - startPage + 1, reflection, feedback.kind, feedback.url, clean(body.feedbackName, 120), status, submittedAt, plan.needs_review ? null : plan.stars, submittedAt, submittedAt, dailyChecks.length + 1).lastInsertRowid); }
+        if (existing) { db.prepare('UPDATE reading_checkins SET start_page=?, end_page=?, pages_read=?, reflection=?, feedback_kind=?, feedback_url=?, feedback_name=?, status=?, submitted_at=?, parent_message=\'\', awarded_stars=?, submitted_active_pet_id=COALESCE(submitted_active_pet_id, ?), pet_business_date=COALESCE(pet_business_date, ?), updated_at=? WHERE id=?').run(startPage, endPage, endPage - startPage + 1, reflection, feedback.kind, feedback.url, clean(body.feedbackName, 120), status, submittedAt, plan.needs_review ? null : plan.stars, petId, checkinDate, submittedAt, existing.id); id = existing.id; }
+        else { id = Number(db.prepare('INSERT INTO reading_checkins (plan_id, student_id, checkin_date, start_page, end_page, pages_read, reflection, feedback_kind, feedback_url, feedback_name, status, submitted_at, awarded_stars, submitted_active_pet_id, pet_business_date, created_at, updated_at, checkin_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(planId, user.id, checkinDate, startPage, endPage, endPage - startPage + 1, reflection, feedback.kind, feedback.url, clean(body.feedbackName, 120), status, submittedAt, plan.needs_review ? null : plan.stars, petId, checkinDate, submittedAt, submittedAt, dailyChecks.length + 1).lastInsertRowid); }
         if (!plan.needs_review) { db.prepare('UPDATE reading_plans SET current_page = MAX(current_page, ?), status = CASE WHEN MAX(current_page, ?) >= ? THEN \'awaiting_confirmation\' ELSE status END, updated_at=? WHERE id=?').run(endPage, endPage, plan.total_pages, submittedAt, planId); if (plan.stars > 0) db.prepare('INSERT INTO rewards (student_id, task_id, reading_checkin_id, stars, message, created_at) VALUES (?, NULL, ?, ?, ?, ?)').run(user.id, id, plan.stars, `阅读打卡：${plan.book_title}`, submittedAt); }
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); if (feedback.uploadedUrl) await deleteStoredUrl(feedback.uploadedUrl, { dataDir }).catch(() => {}); throw error; }
+      if (!plan.needs_review) publishPetEvent({ eventType: 'READING_COMPLETED', sourceType: 'reading_complete', sourceId: String(id), studentId: user.id, petId, businessDate: checkinDate, requestedDelta: 5, occurredAt: submittedAt, reason: `完成阅读打卡：${plan.book_title}` });
       const checkin = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.id = ?`).get(id); json(res, 201, { checkin: readingCheckinJson(checkin, true) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/parent/reading/checkins') {
@@ -1449,6 +1751,7 @@ const server = createServer(async (req, res) => {
         else { db.prepare("UPDATE reading_checkins SET status='completed', end_page=?, pages_read=?, parent_message=?, reviewed_by=?, reviewed_at=?, original_end_page=COALESCE(original_end_page, end_page), adjusted_end_page=?, adjustment_reason=?, awarded_stars=?, updated_at=? WHERE id=?").run(adjustedEndPage, adjustedEndPage - checkin.start_page + 1, message, user.id, reviewedAt, adjustedEndPage, reason, awardedStars, reviewedAt, id); db.prepare("UPDATE reading_plans SET current_page=MAX(current_page, ?), status=CASE WHEN MAX(current_page, ?) >= ? THEN 'awaiting_confirmation' ELSE status END, updated_at=? WHERE id=?").run(adjustedEndPage, adjustedEndPage, checkin.total_pages, reviewedAt, checkin.plan_id); if (awardedStars > 0) db.prepare('INSERT INTO rewards (student_id, task_id, reading_checkin_id, stars, message, created_at) VALUES (?, NULL, ?, ?, ?, ?)').run(checkin.student_id, id, awardedStars, message || `阅读打卡：${checkin.book_title}`, reviewedAt); }
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); throw error; }
+      if (action === 'approve') publishPetEvent({ eventType: 'READING_COMPLETED', sourceType: 'reading_complete', sourceId: String(id), studentId: checkin.student_id, petId: checkin.submitted_active_pet_id, businessDate: checkin.pet_business_date || checkin.checkin_date, requestedDelta: 5, occurredAt: reviewedAt, reason: `审核通过阅读打卡：${checkin.book_title}` });
       const updated = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.id = ?`).get(id); json(res, 200, { checkin: readingCheckinJson(updated, true) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/parent/reviews') {
@@ -1649,12 +1952,14 @@ const server = createServer(async (req, res) => {
       const copySource = Number.isInteger(copyFromTemplateId) && copyFromTemplateId > 0
         ? db.prepare('SELECT * FROM task_templates WHERE id = ? AND creator_id = ?').get(copyFromTemplateId, user.id)
         : null;
+      const petExpWeight = Number(body.petExpWeight ?? copySource?.pet_exp_weight ?? 1);
       if (title.length < 2) { bad(res, 400, '任务模板标题需为 2 至 80 个字符'); return; }
       if (!category) { bad(res, 400, '请选择有效的任务分类'); return; }
       if (!['photo_or_video', 'optional_photo_or_video', 'photo', 'video', 'none'].includes(feedbackType)) { bad(res, 400, '请选择有效的反馈要求'); return; }
       if (!resources) { bad(res, 400, taskResourceValidationMessage(body)); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
+      if (![0, 1, 2, 3].includes(petExpWeight)) { bad(res, 400, '萌宠经验权重需为 0、1、2 或 3'); return; }
       if (body.copyFromTemplateId && !copySource) { bad(res, 403, '只能复制自己创建的任务模板'); return; }
       const sourceResourceIds = copySource ? linkedResources('template', copySource.id, copySource.resource_id).map(resource => resource.id) : [];
       const copyReplacesResources = Boolean(copySource && (body.removeResource === true || Array.isArray(body.existingResourceIds) || Array.isArray(body.resources) || body.resourceData));
@@ -1666,8 +1971,8 @@ const server = createServer(async (req, res) => {
         const resourceIds = copySource ? [...existingCopyResourceIds, ...insertResources(storedResources, user.id)] : insertResources(storedResources, user.id);
         const resourceId = resourceIds[0] || null;
         const createdAt = now();
-        const result = db.prepare(`INSERT INTO task_templates (creator_id,title,category_id,detail,duration_minutes,stars,feedback_type,needs_review,resource_id,is_public,created_at,updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, title, categoryId, detail || '请按照任务要求认真完成。', duration, stars, feedbackType, body.needsReview === false ? 0 : 1, resourceId, body.isPublic === true ? 1 : 0, createdAt, createdAt);
+        const result = db.prepare(`INSERT INTO task_templates (creator_id,title,category_id,detail,duration_minutes,stars,feedback_type,needs_review,pet_exp_weight,resource_id,is_public,created_at,updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, title, categoryId, detail || '请按照任务要求认真完成。', duration, stars, feedbackType, body.needsReview === false ? 0 : 1, petExpWeight, resourceId, body.isPublic === true ? 1 : 0, createdAt, createdAt);
         linkResources('template', Number(result.lastInsertRowid), resourceIds);
         db.exec('COMMIT');
         const template = db.prepare(`${templateSelectSql} WHERE task_templates.id = ?`).get(Number(result.lastInsertRowid));
@@ -1688,6 +1993,7 @@ const server = createServer(async (req, res) => {
       const category = db.prepare('SELECT id FROM task_categories WHERE id = ? AND active = 1').get(categoryId);
       const duration = Number(body.duration);
       const stars = Number(body.stars);
+      const petExpWeight = Number(body.petExpWeight ?? current.pet_exp_weight ?? 1);
       const feedbackType = clean(body.feedbackType, 30) || 'photo_or_video';
       const resources = normalizeTaskResources(body);
       const existingResourceIds = normalizeExistingResourceIds(body);
@@ -1701,6 +2007,7 @@ const server = createServer(async (req, res) => {
       if (existingResourceIds.some(id => !allowedResourceIds.has(id))) { bad(res, 403, '无权引用该任务资料'); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
+      if (![0, 1, 2, 3].includes(petExpWeight)) { bad(res, 400, '萌宠经验权重需为 0、1、2 或 3'); return; }
       const storedResources = replaceResources ? await storeResources(resources, 'task-templates') : [];
       let resourceId = current.resource_id;
       db.exec('BEGIN');
@@ -1712,8 +2019,8 @@ const server = createServer(async (req, res) => {
           resourceId = resourceIds[0] || null;
           linkResources('template', templateId, resourceIds);
         }
-        db.prepare(`UPDATE task_templates SET title = ?, category_id = ?, detail = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ?, resource_id = ?, is_public = ?, updated_at = ? WHERE id = ?`)
-          .run(title, categoryId, detail || '请按照任务要求认真完成。', duration, stars, feedbackType, body.needsReview === false ? 0 : 1, resourceId, body.isPublic === true ? 1 : 0, now(), templateId);
+        db.prepare(`UPDATE task_templates SET title = ?, category_id = ?, detail = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ?, pet_exp_weight = ?, resource_id = ?, is_public = ?, updated_at = ? WHERE id = ?`)
+          .run(title, categoryId, detail || '请按照任务要求认真完成。', duration, stars, feedbackType, body.needsReview === false ? 0 : 1, petExpWeight, resourceId, body.isPublic === true ? 1 : 0, now(), templateId);
         if (replaceResources) [...new Set([...previousIds, current.resource_id].filter(Boolean))].forEach(deleteUnusedResource);
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); await Promise.allSettled(storedResources.map(resource => deleteStoredUrl(resource.url, { dataDir }))); throw error; }
@@ -1747,14 +2054,14 @@ const server = createServer(async (req, res) => {
       const placeholders = templateIds.map(() => '?').join(',');
       const templates = db.prepare(`${templateSelectSql} WHERE task_templates.id IN (${placeholders}) AND (task_templates.creator_id = ? OR task_templates.is_public = 1)`).all(...templateIds, user.id);
       if (templates.length !== templateIds.length) { bad(res, 403, '所选模板不存在或当前账号无权使用'); return; }
-      const insert = db.prepare(`INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,resource_id,status,created_at,series_id,repeat_pattern,repeat_weekdays,series_start_date,series_end_date,schedule_type,available_start_date,available_end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insert = db.prepare(`INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,pet_exp_weight_snapshot,resource_id,status,created_at,series_id,repeat_pattern,repeat_weekdays,series_start_date,series_end_date,schedule_type,available_start_date,available_end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const taskIds = [];
       db.exec('BEGIN');
       try {
         for (const template of templates) for (const studentId of studentIds) {
           const seriesId = schedule.scheduleType === 'repeat' ? randomBytes(12).toString('hex') : '';
           for (const date of schedule.dates) {
-            const taskId = Number(insert.run(studentId, template.title, template.category_name, template.category_icon, template.category_color, template.detail, date, template.duration_minutes, template.stars, template.feedback_type, template.needs_review, template.resource_id, now(), seriesId, schedule.repeatPattern, schedule.weekdays.join(','), schedule.startDate, schedule.endDate, schedule.scheduleType, schedule.scheduleType === 'range' ? schedule.startDate : date, schedule.scheduleType === 'range' ? schedule.endDate : date).lastInsertRowid);
+            const taskId = Number(insert.run(studentId, template.title, template.category_name, template.category_icon, template.category_color, template.detail, date, template.duration_minutes, template.stars, template.feedback_type, template.needs_review, Number(template.pet_exp_weight ?? 1), template.resource_id, 'not_started', now(), seriesId, schedule.repeatPattern, schedule.weekdays.join(','), schedule.startDate, schedule.endDate, schedule.scheduleType, schedule.scheduleType === 'range' ? schedule.startDate : date, schedule.scheduleType === 'range' ? schedule.endDate : date).lastInsertRowid);
             const resourceIds = linkedResources('template', template.id, template.resource_id).map(resource => resource.id);
             linkResources('task', taskId, resourceIds);
             taskIds.push(taskId);
@@ -1823,7 +2130,8 @@ const server = createServer(async (req, res) => {
       const weekTasks = Object.fromEntries(dateRange(week.start, week.end).map(day => [day, serialized.filter(task => taskVisibleOn(task, day))]));
       const taskDates = Object.entries(weekTasks).filter(([, dayTasks]) => dayTasks.length).map(([day]) => day);
       const incompleteTaskDates = overdueUnfinishedTaskDates(weekTasks);
-      json(res, 200, { tasks: weekTasks[date] || [], taskDates, incompleteTaskDates, weekTasks });
+      const taskDateMarkers = taskDateMarkMap(weekTasks);
+      json(res, 200, { tasks: weekTasks[date] || [], taskDates, incompleteTaskDates, taskDateMarkers, weekTasks });
       return;
     }
     if (req.method === 'GET' && /^\/api\/parent\/tasks\/\d+$/.test(url.pathname)) {
@@ -1848,6 +2156,7 @@ const server = createServer(async (req, res) => {
       const category = db.prepare('SELECT name, icon, color FROM task_categories WHERE id = ? AND active = 1').get(Number(body.categoryId));
       const duration = Number(body.duration);
       const stars = Number(body.stars);
+      const petExpWeight = Number(body.petExpWeight ?? 1);
       const feedbackType = clean(body.feedbackType, 30) || 'photo_or_video';
       const resources = normalizeTaskResources(body);
       if (title.length < 2 || !schedule) { bad(res, 400, '请填写任务标题和有效日期；持续日期和重复日期都必须填写有效的结束日期'); return; }
@@ -1856,8 +2165,9 @@ const server = createServer(async (req, res) => {
       if (!resources) { bad(res, 400, taskResourceValidationMessage(body)); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
+      if (![0, 1, 2, 3].includes(petExpWeight)) { bad(res, 400, '萌宠经验权重需为 0、1、2 或 3'); return; }
       const storedResources = await storeResources(resources, 'task-resources');
-      const insert = db.prepare(`INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,resource_id,status,created_at,series_id,repeat_pattern,repeat_weekdays,series_start_date,series_end_date,schedule_type,available_start_date,available_end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insert = db.prepare(`INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,pet_exp_weight_snapshot,resource_id,status,created_at,series_id,repeat_pattern,repeat_weekdays,series_start_date,series_end_date,schedule_type,available_start_date,available_end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const taskIds = [];
       db.exec('BEGIN');
       try {
@@ -1866,7 +2176,7 @@ const server = createServer(async (req, res) => {
         for (const studentId of studentIds) {
           const seriesId = schedule.scheduleType === 'repeat' ? randomBytes(12).toString('hex') : '';
           for (const date of schedule.dates) {
-            const taskId = Number(insert.run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', date, duration, stars, feedbackType, body.needsReview === false ? 0 : 1, resourceId, now(), seriesId, schedule.repeatPattern, schedule.weekdays.join(','), schedule.startDate, schedule.endDate, schedule.scheduleType, schedule.scheduleType === 'range' ? schedule.startDate : date, schedule.scheduleType === 'range' ? schedule.endDate : date).lastInsertRowid);
+            const taskId = Number(insert.run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', date, duration, stars, feedbackType, body.needsReview === false ? 0 : 1, petExpWeight, resourceId, 'not_started', now(), seriesId, schedule.repeatPattern, schedule.weekdays.join(','), schedule.startDate, schedule.endDate, schedule.scheduleType, schedule.scheduleType === 'range' ? schedule.startDate : date, schedule.scheduleType === 'range' ? schedule.endDate : date).lastInsertRowid);
             linkResources('task', taskId, resourceIds);
             taskIds.push(taskId);
           }
@@ -1903,6 +2213,7 @@ const server = createServer(async (req, res) => {
       const category = db.prepare('SELECT name, icon, color FROM task_categories WHERE id = ? AND active = 1').get(Number(body.categoryId));
       const duration = Number(body.duration);
       const stars = Number(body.stars);
+      const petExpWeight = Number(body.petExpWeight ?? task.pet_exp_weight_snapshot ?? 1);
       const feedbackType = clean(body.feedbackType, 30) || 'photo_or_video';
       const resources = normalizeTaskResources(body);
       const existingResourceIds = normalizeExistingResourceIds(body);
@@ -1918,6 +2229,7 @@ const server = createServer(async (req, res) => {
       if (existingResourceIds.some(id => !allowedResourceIds.has(id))) { bad(res, 403, '无权引用该任务资料'); return; }
       if (!Number.isInteger(duration) || duration < 1 || duration > 240) { bad(res, 400, '预计时长需为 1 至 240 分钟'); return; }
       if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
+      if (![0, 1, 2, 3].includes(petExpWeight)) { bad(res, 400, '萌宠经验权重需为 0、1、2 或 3'); return; }
       const storedResources = replaceResources ? await storeResources(resources, 'task-resources') : [];
       const targets = scopeSeries
         ? db.prepare("SELECT * FROM tasks WHERE series_id = ? AND student_id = ? AND is_demo = 0 AND status NOT IN ('pending_review','completed') ORDER BY task_date").all(task.series_id, task.student_id)
@@ -1937,8 +2249,8 @@ const server = createServer(async (req, res) => {
           targetIds.forEach(id => linkResources('task', id, resourceIds));
           db.prepare(`UPDATE tasks SET resource_id = ? WHERE id IN (${placeholders})`).run(resourceId, ...targetIds);
         }
-        if (scopeSeries) db.prepare(`UPDATE tasks SET title = ?, category = ?, icon = ?, category_color = ?, detail = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ? WHERE id IN (${placeholders})`).run(title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', duration, stars, feedbackType, body.needsReview === false ? 0 : 1, ...targetIds);
-        else db.prepare('UPDATE tasks SET student_id = ?, title = ?, category = ?, icon = ?, category_color = ?, detail = ?, task_date = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ?, schedule_type = ?, available_start_date = ?, available_end_date = ? WHERE id = ?').run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', schedule.taskDate, duration, stars, feedbackType, body.needsReview === false ? 0 : 1, schedule.scheduleType, schedule.startDate, schedule.endDate, taskId);
+        if (scopeSeries) db.prepare(`UPDATE tasks SET title = ?, category = ?, icon = ?, category_color = ?, detail = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ?, pet_exp_weight_snapshot = ? WHERE id IN (${placeholders})`).run(title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', duration, stars, feedbackType, body.needsReview === false ? 0 : 1, petExpWeight, ...targetIds);
+        else db.prepare('UPDATE tasks SET student_id = ?, title = ?, category = ?, icon = ?, category_color = ?, detail = ?, task_date = ?, duration_minutes = ?, stars = ?, feedback_type = ?, needs_review = ?, pet_exp_weight_snapshot = ?, schedule_type = ?, available_start_date = ?, available_end_date = ? WHERE id = ?').run(studentId, title, category.name, category.icon, category.color, detail || '请按照任务要求认真完成。', schedule.taskDate, duration, stars, feedbackType, body.needsReview === false ? 0 : 1, petExpWeight, schedule.scheduleType, schedule.startDate, schedule.endDate, taskId);
         if (replaceResources) [...new Set([...previousIds, ...legacyIds])].forEach(deleteUnusedResource);
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); await Promise.allSettled(storedResources.map(resource => deleteStoredUrl(resource.url, { dataDir }))); throw error; }
@@ -1981,6 +2293,9 @@ const server = createServer(async (req, res) => {
         if (!Number.isSafeInteger(stars) || stars < 1) { bad(res, 400, '奖励星星需为正整数'); return; }
         db.prepare("UPDATE tasks SET status = 'completed', reviewed_at = ?, reviewed_by = ?, encouragement = ? WHERE id = ?").run(now(), user.id, message || '完成得很棒！', task.id);
         db.prepare('INSERT INTO rewards (student_id, task_id, stars, message, created_at) VALUES (?, ?, ?, ?, ?)').run(task.student_id, task.id, stars, message || '完成得很棒！', now());
+        const petDate = task.pet_business_date || task.task_date || businessDate();
+        publishPetEvent({ eventType: 'TASK_COMPLETED', sourceType: 'task_complete', sourceId: String(task.id), studentId: task.student_id, petId: task.submitted_active_pet_id, businessDate: petDate, requestedDelta: 10 * Math.max(0, Number(task.pet_exp_weight_snapshot ?? 1) || 0), occurredAt: now(), reason: `审核通过任务：${task.title}` });
+        reconcileDailyPetCompletion(task.student_id, petDate);
       } else if (action === 'needs_more') db.prepare("UPDATE tasks SET status = 'needs_more', encouragement = ? WHERE id = ?").run(message || '请再补充一点学习反馈。', task.id);
       else { bad(res, 400, '审核操作不正确'); return; }
       json(res, 200, { ok: true });
