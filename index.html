@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#2f80ed" />
     <link rel="icon" type="image/png" href="assets/learning-planet-logo.png?v=20260911" />
     <title>学习星球</title>
-    <link rel="stylesheet" href="styles.css?v=20260916-pet-actions-v2" />
+    <link rel="stylesheet" href="styles.css?v=20260916-assessment-papers-v5" />
   </head>
   <body>
     <section class="login-screen" id="login-screen" aria-label="学习星球登录">
@@ -53,6 +53,7 @@
         <button class="nav-item" data-page="tasks"><i data-lucide="list-todo"></i><b>任务列表</b></button>
         <button class="nav-item" data-page="reward-applications"><i data-lucide="gift"></i><b>奖励申请</b></button>
         <button class="nav-item" data-page="reading"><i data-lucide="book-open-check"></i><b>阅读打卡</b></button>
+        <button class="nav-item" data-page="assessments"><i data-lucide="file-check-2"></i><b>我的评测</b><em id="student-assessment-badge" hidden>0</em></button>
         <button class="nav-item" data-page="growth"><i data-lucide="sparkles"></i><b>成长星球</b></button>
         <button class="nav-item" data-page="pet"><i data-lucide="paw-print"></i><b>我的萌宠</b></button>
       </aside>
@@ -64,6 +65,7 @@
         <button class="nav-item" data-parent-page="students"><i data-lucide="graduation-cap"></i><b>学生管理</b></button>
         <button class="nav-item" data-parent-page="assign"><i data-lucide="clipboard-plus"></i><b>任务分配</b></button>
         <button class="nav-item" data-parent-page="reading"><i data-lucide="library-big"></i><b>阅读计划</b></button>
+        <button class="nav-item" data-parent-page="assessments"><i data-lucide="file-check-2"></i><b>评测管理</b></button>
         <button class="nav-item" data-parent-page="templates"><i data-lucide="notebook-tabs"></i><b>任务模板</b></button>
         <button class="nav-item admin-only" data-parent-page="categories"><i data-lucide="tags"></i><b>任务分类</b></button>
         <button class="nav-item" data-parent-page="review"><i data-lucide="badge-check"></i><b>审核中心</b><em>2</em></button>
@@ -119,6 +121,11 @@
           <div class="reading-overview-grid"><section class="reading-month-section"><div class="section-title"><div><h2 id="reading-month-title">本月</h2></div><div class="reading-month-actions"><button class="icon-button" id="reading-month-prev" type="button" aria-label="上个月"><i data-lucide="chevron-left"></i></button><button class="week-today-button" id="reading-month-today" type="button">本月</button><button class="icon-button" id="reading-month-next" type="button" aria-label="下个月"><i data-lucide="chevron-right"></i></button></div></div><div class="reading-month-weekdays"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div><div class="reading-month-grid" id="reading-month"></div></section><section class="reading-summary-section"><div class="section-title"><h2>阅读总结</h2></div><div class="reading-summary-grid" id="reading-summary"></div></section></div>
           <section class="reading-plan-section"><div class="section-title"><h2>阅读计划</h2><span>每本书每天最多打卡 3 次</span></div><div class="student-task-list" id="reading-checkin-list"></div></section>
         </section>
+        <section class="page student-page" id="student-assessments">
+          <div class="page-heading"><div><p class="eyebrow">学习测评</p><h1>我的评测</h1></div></div>
+          <div class="assessment-toolbar"><span>查看当前评测状态</span><button class="secondary-button" data-assessment-refresh><i data-lucide="refresh-cw"></i>刷新</button></div>
+          <div class="assessment-list" id="student-assessment-list"></div>
+        </section>
 
         <section class="page parent-page" id="overview">
           <div class="page-heading"><div><p class="eyebrow" id="overview-date"></p><h1 id="overview-greeting">家长首页</h1></div></div>
@@ -149,6 +156,12 @@
           <div class="tabs reading-parent-tabs" role="tablist" aria-label="阅读内容"><button class="active" type="button" data-reading-parent-tab="plans" role="tab">阅读计划</button><button type="button" data-reading-parent-tab="books" role="tab">我的书架</button></div>
           <section class="reading-parent-section" id="reading-plan-panel"><div class="parent-task-list" id="reading-plan-list"></div></section>
           <section class="reading-parent-section" id="reading-book-panel" hidden><div class="reading-book-list" id="reading-book-list"></div></section>
+        </section>
+        <section class="page parent-page" id="parent-assessments">
+          <div class="page-heading"><div><p class="eyebrow">学习测评</p><h1>评测管理</h1></div></div>
+          <div class="tabs assessment-tabs" role="tablist"><button class="active" type="button" data-assessment-tab="questions">题目库</button><button type="button" data-assessment-tab="papers">评测题单</button><button type="button" data-assessment-tab="results">评测结果</button></div>
+          <div class="assessment-toolbar parent-assessment-toolbar"><span id="parent-assessment-summary" hidden></span><div class="parent-assessment-filter-bar" id="parent-assessment-filter-bar"></div><div class="parent-assessment-actions"><button class="secondary-button" data-assessment-refresh><i data-lucide="refresh-cw"></i>刷新</button><button class="primary-button" data-assessment-action="primary"><i data-lucide="plus"></i><span id="parent-assessment-primary-label">新建题目</span></button></div></div>
+          <div class="assessment-admin-content" id="parent-assessment-content"></div>
         </section>
 
         <section class="page parent-page" id="templates">
@@ -199,7 +212,7 @@
       </main>
     </div>
 
-    <nav class="bottom-nav" aria-label="学生端移动导航"><button class="active" data-page="today"><i data-lucide="clipboard-check"></i><span>我的任务</span></button><button data-page="tasks"><i data-lucide="list-todo"></i><span>任务列表</span></button><button data-page="reading"><i data-lucide="book-open-check"></i><span>阅读打卡</span></button><button data-page="reward-applications"><i data-lucide="gift"></i><span>奖励申请</span></button><button data-page="growth"><i data-lucide="sparkles"></i><span>成长星球</span></button><button data-page="pet"><i data-lucide="paw-print"></i><span>我的萌宠</span></button></nav>
+    <nav class="bottom-nav" aria-label="学生端移动导航"><button class="active" data-page="today"><i data-lucide="clipboard-check"></i><span>我的任务</span></button><button data-page="assessments"><i data-lucide="file-check-2"></i><span>我的评测</span><em id="student-assessment-mobile-badge" hidden>0</em></button><button data-page="tasks"><i data-lucide="list-todo"></i><span>任务列表</span></button><button data-page="reading"><i data-lucide="book-open-check"></i><span>阅读打卡</span></button><button data-page="reward-applications"><i data-lucide="gift"></i><span>奖励申请</span></button><button data-page="growth"><i data-lucide="sparkles"></i><span>成长星球</span></button><button data-page="pet"><i data-lucide="paw-print"></i><span>我的萌宠</span></button></nav>
 
     <dialog id="task-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="task-modal-content"></div></dialog>
     <dialog id="task-detail-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="task-detail-modal-content"></div></dialog>
@@ -226,7 +239,9 @@
     <dialog id="link-parent-dialog" class="input-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">学生关联</p><h2>关联已有家长</h2><form id="link-parent-form" class="dialog-form"><label>选择家长<select id="link-parent-select" required></select></label><p id="link-parent-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="submit" class="primary-button">确认关联</button></div></form></div></dialog>
     <dialog id="unlink-student-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">学生关联</p><h2>确认解除家长与学生的关联？</h2><p id="unlink-student-description">解除后，家长账号将无法再查看这名学生。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-unlink-student">确认解绑</button></div></div></dialog>
     <dialog id="reset-student-password-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">账号安全</p><h2>重置学生密码</h2><p>保存后，学生需要用新密码重新登录。</p><form id="reset-student-password-form" class="password-form"><label>新密码<input id="reset-student-password" type="password" minlength="10" required placeholder="至少 10 位字符" /></label><p id="reset-student-password-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button class="primary-button" type="submit">保存新密码</button></div></form></div></dialog>
-    <dialog id="student-pet-settings-dialog" class="input-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">成长闭环</p><h2 id="student-pet-settings-title">萌宠设置</h2><p id="student-pet-settings-status"></p><form id="student-pet-settings-form" class="dialog-form"><label class="toggle-row"><input id="student-pet-enabled" type="checkbox" /><span></span><b>开启萌宠成长模块</b></label><label>每日互动时长<select id="student-pet-daily-minutes"><option value="0">不限制</option><option value="5">5 分钟</option><option value="10" selected>10 分钟</option><option value="15">15 分钟</option></select></label><p id="student-pet-settings-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="submit" class="primary-button">保存设置</button></div></form></div></dialog>
+    <dialog id="student-pet-settings-dialog" class="input-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">成长闭环</p><h2 id="student-pet-settings-title">萌宠设置</h2><p id="student-pet-settings-status"></p><form id="student-pet-settings-form" class="dialog-form"><label class="toggle-row"><input id="student-pet-enabled" type="checkbox" /><span></span><b>开启萌宠成长模块</b></label><label id="student-pet-nickname-field" hidden>萌宠名字<input id="student-pet-nickname" maxlength="12" /></label><label>每日互动时长<select id="student-pet-daily-minutes"><option value="0">不限制</option><option value="5">5 分钟</option><option value="10" selected>10 分钟</option><option value="15">15 分钟</option></select></label><p id="student-pet-settings-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="submit" class="primary-button">保存设置</button></div></form></div></dialog>
+    <dialog id="pet-nickname-dialog" class="input-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">萌宠空间</p><h2>修改萌宠名字</h2><form id="pet-nickname-form" class="dialog-form"><label>萌宠名字<span>1 至 12 个字符</span><input id="pet-nickname-input" maxlength="12" required /></label><p id="pet-nickname-error" class="login-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="submit" class="primary-button">保存名字</button></div></form></div></dialog>
+    <dialog id="pet-stage-dialog" class="input-dialog pet-stage-dialog"><button class="modal-close" aria-label="关闭">×</button><div id="pet-stage-dialog-content"></div></dialog>
     <dialog id="logout-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">退出登录</p><h2>确认退出当前账号？</h2><p>退出后将返回登录页面。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-logout">确认退出</button></div></div></dialog>
     <dialog id="student-status-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">账号状态</p><h2 id="student-status-title">确认禁用学生账号？</h2><p id="student-status-description">禁用后，该学生将无法登录系统。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-student-status">确认禁用</button></div></div></dialog>
     <dialog id="category-dialog" class="input-dialog category-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">任务设置</p><h2 id="category-dialog-title">新增分类</h2><form id="category-form" class="dialog-form"><input id="category-id" type="hidden" /><label>分类名称<span>必填</span><input id="category-name" required minlength="2" maxlength="24" placeholder="例如：科学探索" /></label><fieldset class="icon-picker-field"><legend>分类图标<span>必选</span></legend><div class="icon-picker" id="category-icon-options" aria-label="选择分类图标"></div></fieldset><p class="login-error" id="category-error"></p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="submit" class="primary-button" id="category-submit">保存</button></div></form></div></dialog>
@@ -234,9 +249,12 @@
     <dialog id="task-series-update-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">修改重复任务</p><h2>确认修改整个任务系列？</h2><p>本次修改将应用到该系列中所有尚未进入待审核或已完成状态的任务。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button" id="confirm-task-series-update">确认修改</button></div></div></dialog>
     <dialog id="category-delete-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">删除分类</p><h2>确认删除这个任务分类？</h2><p>已有任务不会受影响，之后分配任务时将不再显示该分类。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-category-delete">确认删除</button></div></div></dialog>
     <dialog id="template-delete-dialog" class="confirm-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content"><p class="eyebrow">删除模板</p><h2>确认删除这个任务模板？</h2><p>已经分配给学生的任务不会受到影响。</p><div class="modal-actions"><button type="button" class="secondary-button dialog-cancel">取消</button><button type="button" class="primary-button danger-button" id="confirm-template-delete">确认删除</button></div></div></dialog>
+    <dialog id="assessment-editor-dialog" class="input-dialog assessment-editor-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content" id="assessment-editor-content"></div></dialog>
+    <dialog id="assessment-question-picker-dialog" class="input-dialog assessment-editor-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content" id="assessment-question-picker-content"></div></dialog>
+    <dialog id="assessment-dialog" class="input-dialog assessment-dialog"><button class="modal-close" aria-label="关闭">×</button><div class="modal-content" id="assessment-dialog-content"></div></dialog>
     <div class="global-loader" id="global-loader" role="status" aria-live="polite" hidden><div class="loader-orbit"><span class="loader-star">★</span><i></i><i></i><i></i></div><p>正在准备，请稍候…</p></div>
     <div class="toast" id="toast" role="status"></div>
     <script src="assets/vendor/lucide.min.js?v=1.42.0"></script>
-    <script src="app.js?v=20260916-pet-actions-v2"></script>
+    <script src="app.js?v=20260916-assessment-papers-v5"></script>
   </body>
 </html>

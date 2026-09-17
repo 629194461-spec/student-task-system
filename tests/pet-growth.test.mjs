@@ -40,6 +40,18 @@ test('student pet growth loop supports adoption, repeatable interactions, and ta
   const adopted = await request('/api/student/pets/adopt', { cookie: studentLogin.cookie, method: 'POST', body: JSON.stringify({ speciesCode: adoption.body.species[0].code, nickname: '小星' }) });
   assert.equal(adopted.response.status, 201);
   assert.equal(adopted.body.pet.pet.nickname, '小星');
+  assert.equal(adopted.body.pet.pet.stage.name, '幼崽期');
+  assert.equal(adopted.body.pet.stages.length, 5);
+
+  const studentRenamed = await request('/api/student/pet', { cookie: studentLogin.cookie, method: 'PATCH', body: JSON.stringify({ nickname: '小月亮' }) });
+  assert.equal(studentRenamed.response.status, 200);
+  assert.equal(studentRenamed.body.pet.pet.nickname, '小月亮');
+  const parentPet = await request(`/api/parent/students/${studentId}/pet`, { cookie: admin });
+  assert.equal(parentPet.response.status, 200);
+  assert.equal(parentPet.body.pet.pet.nickname, '小月亮');
+  const parentRenamed = await request(`/api/parent/students/${studentId}/pet`, { cookie: admin, method: 'PATCH', body: JSON.stringify({ nickname: '小星球' }) });
+  assert.equal(parentRenamed.response.status, 200);
+  assert.equal(parentRenamed.body.pet.pet.nickname, '小星球');
 
   const firstInteraction = await request('/api/student/pet/interactions', { cookie: studentLogin.cookie, method: 'POST', body: JSON.stringify({ type: 'pet', requestId: `pet-${suffix}` }) });
   assert.equal(firstInteraction.response.status, 200);

@@ -98,6 +98,8 @@ test('admin manages parent accounts and parent-student visibility', async () => 
   const p2Stats = await request('/api/parent/statistics?period=week', { cookie: p2Login.cookie });
   assert.deepEqual(p2Stats.body.students.map(student => student.studentId), [studentId]);
   assert.equal(p2Stats.body.students[0].total, 0);
+  assert.deepEqual(p2Stats.body.students[0].growth, { suns: 0, moons: 0, stars: 0, totalStars: 0 });
+  assert.deepEqual(p2Stats.body.summary.growth, { suns: 0, moons: 0, stars: 0, totalStars: 0 });
   assert.equal(p2Stats.body.students[0].completionRate, null);
   assert.equal(p2Stats.body.students[0].onTimeRate, null);
   assert.equal(p2Stats.body.summary.completionRate, null);

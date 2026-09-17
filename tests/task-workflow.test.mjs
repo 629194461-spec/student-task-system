@@ -55,12 +55,15 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
 
   const parentFile = { name: '家长学习资料.txt', data: 'data:text/plain;base64,5rWL6K+V' };
   const draftTask = await assign(firstId, '草稿任务', currentDate, true, [parentFile]);
+  const singleCharacterTask = await assign(firstId, '字', currentDate);
   const completedTask = await assign(firstId, '直接完成任务', currentDate, false);
   const futureTask = await assign(firstId, '未来任务', addDays(currentDate, 1));
+  const farFutureTask = await assign(firstId, '远期未完成任务', addDays(currentDate, 9));
   const pastTask = await assign(firstId, '昨日未完成任务', addDays(currentDate, -1));
   const previousWeekTask = await assign(firstId, '上一周未完成提醒', addDays(currentDate, -7));
   const otherTask = await assign(secondId, '另一学生任务', currentDate);
-  for (const result of [draftTask, completedTask, futureTask, pastTask, previousWeekTask, otherTask]) assert.equal(result.response.status, 201);
+  for (const result of [draftTask, singleCharacterTask, completedTask, futureTask, farFutureTask, pastTask, previousWeekTask, otherTask]) assert.equal(result.response.status, 201);
+  assert.equal(singleCharacterTask.body.taskIds.length, 1, 'a one-character task title is valid when the title is non-empty');
 
   const firstLogin = await login(`task_a_${suffix}`, 'Student2026A', 'student');
   const secondLogin = await login(`task_b_${suffix}`, 'Student2026A', 'student');
@@ -77,6 +80,8 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal(studentWeek.body.taskDateMarkers[currentDate], 'active', 'today\'s unfinished tasks receive a blue active marker');
   assert.equal(studentWeek.body.taskDateMarkers[addDays(currentDate, 1)], 'active', 'future unfinished tasks receive a blue active marker');
   assert.equal(studentWeek.body.taskDateMarkers[addDays(currentDate, -1)], 'overdue', 'past unfinished tasks receive a red overdue marker');
+  const farFutureWeek = await request(`/api/student/dashboard?date=${addDays(currentDate, 9)}`, { cookie: firstLogin.cookie });
+  assert.equal(farFutureWeek.body.taskDateMarkers[addDays(currentDate, 9)], 'active', 'future unfinished tasks receive a blue active marker');
   const parentWeek = await request(`/api/parent/tasks?date=${currentDate}&studentId=${firstId}`, { cookie: admin });
   assert.equal(Object.keys(parentWeek.body.weekTasks).length, 7);
   assert.ok(parentWeek.body.weekTasks[currentDate].some(task => task.title === '草稿任务'));
@@ -84,6 +89,8 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.ok(!parentWeek.body.incompleteTaskDates.includes(currentDate), 'parent date controls only receive overdue task markers');
   assert.equal(parentWeek.body.taskDateMarkers[currentDate], 'active', 'parent and student controls use the same marker state');
   assert.equal(parentWeek.body.taskDateMarkers[addDays(currentDate, -1)], 'overdue', 'parent past unfinished tasks receive the same red overdue marker');
+  const parentFarFutureWeek = await request(`/api/parent/tasks?date=${addDays(currentDate, 9)}&studentId=${firstId}`, { cookie: admin });
+  assert.equal(parentFarFutureWeek.body.taskDateMarkers[addDays(currentDate, 9)], 'active', 'parent future unfinished tasks receive the same blue active marker');
 
   const draftId = draftTask.body.taskIds[0];
   const studentDetailBeforeStart = await request(`/api/student/tasks/${draftId}`, { cookie: firstLogin.cookie });
