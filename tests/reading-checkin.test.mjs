@@ -15,6 +15,45 @@ async function login(username, password, role = 'parent') {
   return request('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password, role, captchaId: captcha.body.id, captcha: answer }) });
 }
 
+function shiftDate(date, days) {
+  const value = new Date(`${date}T12:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
+test('reading check-ins allow the previous three days and reject older or future dates', async () => {
+  const adminLogin = await login('admin', 'admin@2026');
+  assert.equal(adminLogin.response.status, 200);
+  const admin = adminLogin.cookie;
+  const suffix = Date.now();
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const allowedMakeupDate = shiftDate(today, -3);
+  const expiredMakeupDate = shiftDate(today, -4);
+  const studentResult = await request('/api/parent/students', { cookie: admin, method: 'POST', body: JSON.stringify({ displayName: '补打卡测试学生', username: `makeup_student_${suffix}`, password: 'Student2026A', grade: '三年级', parentIds: [] }) });
+  assert.equal(studentResult.response.status, 201);
+  const bookResult = await request('/api/parent/reading/books', { cookie: admin, method: 'POST', body: JSON.stringify({ title: `补打卡测试书${suffix}`, totalPages: 20 }) });
+  assert.equal(bookResult.response.status, 201);
+  const planResult = await request('/api/parent/reading/plans', { cookie: admin, method: 'POST', body: JSON.stringify({ bookId: bookResult.body.book.id, studentIds: [studentResult.body.student.id], startDate: expiredMakeupDate, startPage: 1, targetPages: 2, frequency: 'daily', weekdays: [], stars: 1, feedbackType: 'none', needsReview: false }) });
+  assert.equal(planResult.response.status, 201);
+  const studentLogin = await login(`makeup_student_${suffix}`, 'Student2026A', 'student');
+  assert.equal(studentLogin.response.status, 200);
+  const planId = planResult.body.plans[0].id;
+
+  const allowedDashboard = await request(`/api/student/reading?month=${today.slice(0, 7)}&date=${allowedMakeupDate}`, { cookie: studentLogin.cookie });
+  assert.equal(allowedDashboard.response.status, 200);
+  assert.equal(allowedDashboard.body.cards[0].canCheckin, true);
+  const allowedCheckin = await request('/api/student/reading/checkins', { cookie: studentLogin.cookie, method: 'POST', body: JSON.stringify({ planId, checkinDate: allowedMakeupDate, endPage: 2 }) });
+  assert.equal(allowedCheckin.response.status, 201);
+
+  const expiredDashboard = await request(`/api/student/reading?month=${today.slice(0, 7)}&date=${expiredMakeupDate}`, { cookie: studentLogin.cookie });
+  assert.equal(expiredDashboard.response.status, 400);
+  const expiredCheckin = await request('/api/student/reading/checkins', { cookie: studentLogin.cookie, method: 'POST', body: JSON.stringify({ planId, checkinDate: expiredMakeupDate, endPage: 3 }) });
+  assert.equal(expiredCheckin.response.status, 400);
+  assert.match(expiredCheckin.body.error, /过去 3 天/);
+  const futureCheckin = await request('/api/student/reading/checkins', { cookie: studentLogin.cookie, method: 'POST', body: JSON.stringify({ planId, checkinDate: shiftDate(today, 1), endPage: 3 }) });
+  assert.equal(futureCheckin.response.status, 400);
+});
+
 test('reading dashboard tracks monthly check-ins and enforces each book daily limits', async () => {
   const adminLogin = await login('admin', 'admin@2026');
   assert.equal(adminLogin.response.status, 200);

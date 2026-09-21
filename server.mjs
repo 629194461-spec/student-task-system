@@ -70,6 +70,11 @@ async function sendRecoveryCode(email, code) { const webhook = process.env.EMAIL
 function businessDate() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: process.env.APP_TIMEZONE || 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 }
+function addDateStr(dateStr, days) {
+  const d = new Date(`${dateStr}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
 function weekRange(dateString = businessDate()) {
   const date = new Date(`${dateString}T12:00:00Z`);
   const mondayOffset = (date.getUTCDay() + 6) % 7;
@@ -553,6 +558,7 @@ function migrate() {
       business_date TEXT NOT NULL, mood INTEGER NOT NULL DEFAULT 60, satiety INTEGER NOT NULL DEFAULT 60,
       cleanliness INTEGER NOT NULL DEFAULT 60, earned_exp INTEGER NOT NULL DEFAULT 0,
       food_earned INTEGER NOT NULL DEFAULT 0, active_seconds INTEGER NOT NULL DEFAULT 0,
+      last_decay_at TEXT NOT NULL DEFAULT '',
       PRIMARY KEY(student_pet_id, business_date)
     );
     CREATE TABLE IF NOT EXISTS pet_exp_ledger (
@@ -606,6 +612,9 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_reading_checkins_student_status ON reading_checkins(student_id, status, checkin_date DESC);
   `);
   try { db.exec("ALTER TABLE tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'standard'"); } catch (error) {
+    if (!/duplicate column name/i.test(error.message)) throw error;
+  }
+  try { db.exec("ALTER TABLE pet_daily_states ADD COLUMN last_decay_at TEXT NOT NULL DEFAULT ''"); } catch (error) {
     if (!/duplicate column name/i.test(error.message)) throw error;
   }
   const petInteractionSchema = String(db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pet_interactions'").get()?.sql || '');
@@ -861,9 +870,28 @@ function normalizePetNickname(value) {
   return nickname && Array.from(nickname).length <= 12 && !/https?:\/\//i.test(nickname) ? nickname : '';
 }
 function petSpeciesJson(species) { return species ? { code: species.code, name: species.name, personality: species.personality, personalityLine: species.personality_line, assetUrl: signStoredUrl(species.asset_url), sortOrder: Number(species.sort_order) } : null; }
-function ensurePetDailyState(petId, date) {
-  db.prepare('INSERT OR IGNORE INTO pet_daily_states (student_pet_id,business_date) VALUES (?,?)').run(petId, date);
+function settlePetStateDecay(petId, date, timestamp = now()) {
+  const daily = db.prepare('SELECT * FROM pet_daily_states WHERE student_pet_id = ? AND business_date = ?').get(petId, date);
+  if (!daily) return null;
+  const currentMs = Date.parse(timestamp);
+  const lastMs = Date.parse(daily.last_decay_at || '');
+  if (!Number.isFinite(currentMs)) return daily;
+  if (!Number.isFinite(lastMs)) {
+    db.prepare('UPDATE pet_daily_states SET last_decay_at = ? WHERE student_pet_id = ? AND business_date = ?').run(timestamp, petId, date);
+    return { ...daily, last_decay_at: timestamp };
+  }
+  if (currentMs <= lastMs) return daily;
+  const intervals = Math.floor((currentMs - lastMs) / (2 * 60 * 60 * 1000));
+  if (!intervals) return daily;
+  const settledAt = new Date(lastMs + intervals * 2 * 60 * 60 * 1000).toISOString();
+  const decrease = intervals * 10;
+  db.prepare('UPDATE pet_daily_states SET mood = MAX(0, mood - ?), satiety = MAX(0, satiety - ?), cleanliness = MAX(0, cleanliness - ?), last_decay_at = ? WHERE student_pet_id = ? AND business_date = ?').run(decrease, decrease, decrease, settledAt, petId, date);
   return db.prepare('SELECT * FROM pet_daily_states WHERE student_pet_id = ? AND business_date = ?').get(petId, date);
+}
+function ensurePetDailyState(petId, date) {
+  const timestamp = now();
+  db.prepare('INSERT OR IGNORE INTO pet_daily_states (student_pet_id,business_date,last_decay_at) VALUES (?,?,?)').run(petId, date, timestamp);
+  return settlePetStateDecay(petId, date, timestamp);
 }
 function activePetForStudent(studentId) { return db.prepare(`SELECT student_pets.*, pet_species.code AS species_code, pet_species.name AS species_name, pet_species.personality, pet_species.personality_line, pet_species.asset_url
   FROM student_pets JOIN pet_species ON pet_species.id = student_pets.species_id
@@ -890,7 +918,7 @@ function settlePetEvent(event) {
   if (existing) return { delta: Number(existing.delta), inserted: false, skipped: false };
   const date = event.businessDate || businessDate();
   ensurePetDailyState(pet.id, date);
-  const sourceCap = sourceType === 'task_complete' ? 50 : sourceType === 'reading_complete' ? 5 : sourceType === 'daily_completion' ? 15 : sourceType === 'interaction' ? 5 : PET_DAILY_EXP_LIMIT;
+  const sourceCap = sourceType === 'task_complete' ? 50 : sourceType === 'reading_complete' ? 5 : sourceType === 'daily_completion' ? 15 : PET_DAILY_EXP_LIMIT;
   const sourceUsed = Number(db.prepare('SELECT COALESCE(SUM(delta),0) AS total FROM pet_exp_ledger WHERE student_pet_id = ? AND business_date = ? AND source_type = ?').get(pet.id, date, sourceType)?.total || 0);
   const studentDayUsed = Number(db.prepare(`SELECT COALESCE(SUM(pet_exp_ledger.delta),0) AS total FROM pet_exp_ledger JOIN student_pets ON student_pets.id = pet_exp_ledger.student_pet_id WHERE student_pets.student_id = ? AND pet_exp_ledger.business_date = ?`).get(event.studentId, date)?.total || 0);
   const requested = Math.max(0, Number(event.requestedDelta) || 0);
@@ -964,7 +992,7 @@ function taskIsOverdueOn(task, date, currentDate = businessDate()) {
   if (taskIsCompleted(task)) return false;
   if (task?.isDateRange || task?.schedule_type === 'range') {
     const endDate = task.availableEndDate || task.available_end_date || task.task_date;
-    return date === endDate && endDate < currentDate;
+    return date === endDate;
   }
   return date < currentDate;
 }
@@ -1374,7 +1402,8 @@ const server = createServer(async (req, res) => {
       if (!supported.includes(type) || !requestId) { bad(res, 400, '互动参数不正确'); return; }
       const date = businessDate(); const daily = ensurePetDailyState(pet.id, date);
       const changes = { pet: ['mood', 10], feed: ['satiety', 20], clean: ['cleanliness', 20], play: ['mood', 20] }[type];
-      if (Number(daily[changes[0]] || 0) >= 100) { json(res, 200, { alreadyDone: false, applied: false, earnedExp: 0, message: '该状态已达到 100，上限后不会继续增加', pet: petOverview(user.id, false) }); return; }
+      const stateAtLimit = Number(daily[changes[0]] || 0) >= 100;
+      if (type !== 'feed' && stateAtLimit) { json(res, 200, { alreadyDone: false, applied: false, earnedExp: 0, message: '该状态已达到 100，上限后不会继续增加经验', pet: petOverview(user.id, false) }); return; }
       if (type === 'feed' && Number(db.prepare("SELECT quantity FROM pet_inventory WHERE student_pet_id = ? AND item_code = 'basic_food'").get(pet.id)?.quantity || 0) < 1) { bad(res, 409, '今天没有可用的基础食物'); return; }
       const timestamp = now(); db.exec('BEGIN'); let interactionId;
       try {
@@ -1383,8 +1412,9 @@ const server = createServer(async (req, res) => {
         interactionId = Number(db.prepare('INSERT INTO pet_interactions (student_pet_id,business_date,type,request_id,exp_delta,inventory_delta,created_at) VALUES (?,?,?,?,?,?,?)').run(pet.id, date, type, requestId, 0, type === 'feed' ? -1 : 0, timestamp).lastInsertRowid);
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); throw error; }
-      publishPetEvent({ eventType: 'INTERACTION', sourceType: 'interaction', sourceId: `${date}:${type}:${interactionId}`, interactionId, studentId: user.id, petId: pet.id, businessDate: date, requestedDelta: PET_INTERACTION_EXP[type], occurredAt: timestamp, reason: `完成${type === 'pet' ? '摸摸' : type === 'feed' ? '喂食' : type === 'clean' ? '清洁' : '玩耍'}` });
-      json(res, 200, { alreadyDone: false, applied: true, pet: petOverview(user.id, false) }); return;
+      const requestedDelta = stateAtLimit ? 0 : PET_INTERACTION_EXP[type];
+      publishPetEvent({ eventType: 'INTERACTION', sourceType: 'interaction', sourceId: `${date}:${type}:${interactionId}`, interactionId, studentId: user.id, petId: pet.id, businessDate: date, requestedDelta, occurredAt: timestamp, reason: `完成${type === 'pet' ? '摸摸' : type === 'feed' ? '喂食' : type === 'clean' ? '清洁' : '玩耍'}` });
+      json(res, 200, { alreadyDone: false, applied: true, earnedExp: requestedDelta, message: stateAtLimit ? '饱足已达到 100，已完成喂食但不增加经验' : '', pet: petOverview(user.id, false) }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/student/pet/growth') {
       const user = requireUser(req, res); if (!user || user.role !== 'student') return;
@@ -1793,13 +1823,13 @@ const server = createServer(async (req, res) => {
       }
       const studentId = Number(url.searchParams.get('studentId') || students[0]?.id);
       if (!students.some(student => student.id === studentId)) { bad(res, 403, '无权查看该学生'); return; }
-      const pending = db.prepare(`SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.student_id = ? AND tasks.status = 'pending_review' AND tasks.is_demo = 0 ORDER BY tasks.submitted_at`).all(studentId).map(taskJson);
+      const pending = db.prepare(`SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.student_id = ? AND tasks.status = 'pending_review' AND tasks.task_type <> 'assessment' AND tasks.is_demo = 0 ORDER BY tasks.submitted_at`).all(studentId).map(taskJson);
       const rewardPendingCount = Number(db.prepare("SELECT COUNT(*) AS total FROM reward_applications WHERE status = 'pending' AND student_id = ?").get(studentId).total || 0);
       const readingPendingCount = Number(db.prepare("SELECT COUNT(*) AS total FROM reading_checkins WHERE status = 'pending_review' AND student_id = ?").get(studentId).total || 0);
       const currentDate = businessDate();
       const week = weekRange(currentDate);
-      const todayTasks = db.prepare("SELECT status FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date = ?)) AND is_demo = 0").all(studentId, currentDate, currentDate, currentDate);
-      const weekTasks = db.prepare("SELECT status, task_date FROM tasks WHERE student_id = ? AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0").all(studentId, week.end, week.start, week.start, week.end);
+      const todayTasks = db.prepare("SELECT status FROM tasks WHERE student_id = ? AND task_type <> 'assessment' AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date = ?)) AND is_demo = 0").all(studentId, currentDate, currentDate, currentDate);
+      const weekTasks = db.prepare("SELECT status, task_date FROM tasks WHERE student_id = ? AND task_type <> 'assessment' AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ?)) AND is_demo = 0").all(studentId, week.end, week.start, week.start, week.end);
       const weekStars = Number(db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND substr(created_at, 1, 10) BETWEEN ? AND ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(studentId, week.start, week.end).total);
       const totalStars = Number(db.prepare('SELECT COALESCE(SUM(stars),0) AS total FROM rewards WHERE student_id = ? AND (task_id IS NULL OR task_id IN (SELECT id FROM tasks WHERE is_demo = 0))').get(studentId).total);
       const readingActiveBookCount = Number(db.prepare("SELECT COUNT(DISTINCT book_id) AS total FROM reading_plans WHERE student_id = ? AND status IN ('active','paused','awaiting_confirmation')").get(studentId).total || 0);
@@ -2036,20 +2066,24 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/student/reading') {
       const user = requireUser(req, res); if (!user) return; if (user.role !== 'student') { bad(res, 403, '学生账号专属接口'); return; }
       const currentDate = businessDate(); const month = clean(url.searchParams.get('month'), 7) || currentDate.slice(0, 7);
+      const queryDate = clean(url.searchParams.get('date'), 10) || currentDate;
+      const earliestMakeup = addDateStr(currentDate, -3);
+      if (queryDate > currentDate || queryDate < earliestMakeup) { bad(res, 400, '只能查看当天或过去 3 天内的打卡'); return; }
       if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(month)) { bad(res, 400, '月份格式不正确'); return; }
       const calendar = monthRange(`${month}-01`);
       const plans = db.prepare(`${readingPlanSelectSql} WHERE reading_plans.student_id = ? AND reading_plans.status = 'active' ORDER BY reading_plans.created_at DESC, reading_plans.id DESC`).all(user.id);
       const monthChecks = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.student_id = ? AND reading_checkins.checkin_date BETWEEN ? AND ? ORDER BY reading_checkins.checkin_date DESC, reading_checkins.id DESC`).all(user.id, calendar.start, calendar.end);
-      const todayChecks = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.student_id = ? AND reading_checkins.checkin_date = ? ORDER BY reading_checkins.id DESC`).all(user.id, currentDate);
-      const todayChecksByPlan = new Map(plans.map(plan => [plan.id, todayChecks.filter(check => check.plan_id === plan.id)]));
+      const dateChecks = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.student_id = ? AND reading_checkins.checkin_date = ? ORDER BY reading_checkins.id DESC`).all(user.id, queryDate);
+      const dateChecksByPlan = new Map(plans.map(plan => [plan.id, dateChecks.filter(check => check.plan_id === plan.id)]));
       const cards = plans.map(plan => {
-        const planChecks = todayChecksByPlan.get(plan.id) || []; const existing = planChecks.find(check => check.status === 'needs_more') || planChecks[0];
+        const planChecks = dateChecksByPlan.get(plan.id) || []; const existing = planChecks.find(check => check.status === 'needs_more') || planChecks[0];
         const startPage = existing?.status === 'needs_more' ? Number(existing.start_page) : Math.max(Number(plan.start_page), approvedReadingEndPage(plan.id) + 1);
-        const dueToday = readingDueOn(plan, currentDate);
+        const dueOnDate = readingDueOn(plan, queryDate);
         const hasPending = planChecks.some(check => check.status === 'pending_review'); const remaining = Math.max(0, 3 - planChecks.length);
-        const canCheckin = Boolean(dueToday && startPage <= Number(plan.total_pages) && !hasPending && (existing?.status === 'needs_more' || remaining > 0));
-        const unavailableReason = hasPending ? '有打卡待审核' : !dueToday ? '今日不安排' : startPage > Number(plan.total_pages) ? '已读完，等待确认' : remaining === 0 ? '本书今日已达 3 次' : '';
-        return { plan: readingPlanJson(plan), checkin: existing ? readingCheckinJson(existing, true) : null, todayCheckins: planChecks.map(check => readingCheckinJson(check, true)), todayCount: planChecks.length, dailyLimit: { max: 3, remaining, hasPending }, expectedStartPage: startPage, canCheckin, unavailableReason };
+        const isToday = queryDate === currentDate;
+        const canCheckin = Boolean(dueOnDate && startPage <= Number(plan.total_pages) && !hasPending && (existing?.status === 'needs_more' || remaining > 0));
+        const unavailableReason = hasPending ? '有打卡待审核' : !dueOnDate ? (isToday ? '今日不安排' : '该日不安排') : startPage > Number(plan.total_pages) ? '已读完，等待确认' : remaining === 0 ? '本书当日已达 3 次' : '';
+        return { plan: readingPlanJson(plan), checkin: existing ? readingCheckinJson(existing, true) : null, todayCheckins: planChecks.map(check => readingCheckinJson(check, true)), todayCount: planChecks.length, dailyLimit: { max: 3, remaining, hasPending }, expectedStartPage: startPage, canCheckin, unavailableReason, checkinDate: queryDate };
       });
       const readingDays = Number(db.prepare('SELECT COUNT(DISTINCT checkin_date) AS total FROM reading_checkins WHERE student_id = ?').get(user.id).total || 0);
       const activeBookCount = Number(db.prepare("SELECT COUNT(DISTINCT book_id) AS total FROM reading_plans WHERE student_id = ? AND status = 'active'").get(user.id).total || 0);
@@ -2068,6 +2102,9 @@ const server = createServer(async (req, res) => {
       const plan = db.prepare(`${readingPlanSelectSql} WHERE reading_plans.id = ? AND reading_plans.student_id = ?`).get(planId, user.id);
       if (!plan || plan.status !== 'active') { bad(res, 404, '阅读计划不存在或已结束'); return; }
       if (!readingDueOn(plan, checkinDate) || checkinDate > businessDate()) { bad(res, 400, '只能在计划阅读日提交当天或历史打卡'); return; }
+      const todayDate = businessDate();
+      const earliestMakeup = addDateStr(todayDate, -3);
+      if (checkinDate < earliestMakeup) { bad(res, 400, '最多补打卡过去 3 天内的日期'); return; }
       const dailyChecks = db.prepare('SELECT * FROM reading_checkins WHERE plan_id = ? AND checkin_date = ? ORDER BY id DESC').all(planId, checkinDate);
       const existing = dailyChecks.find(check => check.status === 'needs_more');
       if (dailyChecks.some(check => check.status === 'pending_review')) { bad(res, 409, '本书当天已有打卡待审核，请等待家长审核后再提交'); return; }
@@ -2487,7 +2524,7 @@ const server = createServer(async (req, res) => {
       if (studentId && !allowedIds.includes(studentId)) { bad(res, 403, '无权查看该学生任务'); return; }
       if (!allowedIds.length) { json(res, 200, { tasks: [] }); return; }
       const week = weekRange(date);
-      const baseSql = `SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE ((tasks.schedule_type = 'range' AND tasks.available_start_date <= ? AND tasks.available_end_date >= ?) OR (tasks.schedule_type <> 'range' AND tasks.task_date BETWEEN ? AND ?)) AND tasks.is_demo = 0`;
+      const baseSql = `SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.task_type <> 'assessment' AND ((tasks.schedule_type = 'range' AND tasks.available_start_date <= ? AND tasks.available_end_date >= ?) OR (tasks.schedule_type <> 'range' AND tasks.task_date BETWEEN ? AND ?)) AND tasks.is_demo = 0`;
       const weekRows = studentId
         ? db.prepare(`${baseSql} AND tasks.student_id = ? ORDER BY ${taskStatusOrderSql}, tasks.created_at DESC, tasks.id DESC`).all(week.end, week.start, week.start, week.end, studentId)
         : db.prepare(`${baseSql} AND tasks.student_id IN (${allowedIds.map(() => '?').join(',')}) ORDER BY ${taskStatusOrderSql}, tasks.created_at DESC, tasks.id DESC`).all(week.end, week.start, week.start, week.end, ...allowedIds);
