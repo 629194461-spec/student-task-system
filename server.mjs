@@ -144,6 +144,10 @@ function json(res, status, body, headers = {}) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers });
   res.end(JSON.stringify(body));
 }
+function csv(res, filename, content) {
+  res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="${filename}"`, 'cache-control': 'no-store' });
+  res.end(`\ufeff${content}`);
+}
 function bad(res, status, message) { json(res, status, { error: message }); }
 function readBody(req, maxBytes = 64 * 1024) {
   return new Promise((resolveBody, reject) => {
@@ -988,23 +992,36 @@ function overdueUnfinishedTaskDates(weekTasks, currentDate = businessDate()) {
 function taskIsCompleted(task) {
   return String(task?.status || '').toLowerCase() === 'completed';
 }
-function taskIsOverdueOn(task, date, currentDate = businessDate()) {
-  if (taskIsCompleted(task)) return false;
-  if (task?.isDateRange || task?.schedule_type === 'range') {
-    const endDate = task.availableEndDate || task.available_end_date || task.task_date;
-    return date === endDate;
+function taskScheduleType(task) {
+  return task?.isDateRange || task?.scheduleType === 'range' || task?.schedule_type === 'range' ? 'range' : 'single';
+}
+function taskDateStatusMarker(task, date, currentDate = businessDate()) {
+  const status = String(task?.status || '').toLowerCase();
+  const isRange = taskScheduleType(task) === 'range';
+  const endDate = task?.availableEndDate || task?.available_end_date || task?.endDate || task?.task_date || task?.date;
+
+  if (status === 'completed') return 'completed';
+  if (status === 'pending_review') return 'pending';
+
+  if (isRange) {
+    // Keep the whole continuous-task period visible. After expiry only the
+    // deadline turns red; earlier dates remain blue task markers.
+    if (endDate < currentDate) return date === endDate ? 'overdue' : 'active';
+    return 'active';
   }
-  return date < currentDate;
+  return date < currentDate ? 'overdue' : 'active';
+}
+function taskIsOverdueOn(task, date, currentDate = businessDate()) {
+  return taskDateStatusMarker(task, date, currentDate) === 'overdue';
 }
 function taskDateMarkMap(weekTasks, currentDate = businessDate()) {
   return Object.fromEntries(Object.entries(weekTasks).flatMap(([date, dayTasks]) => {
     if (!dayTasks.length) return [];
-    if (dayTasks.every(taskIsCompleted)) return [[date, 'completed']];
-    if (dayTasks.some(task => taskIsOverdueOn(task, date, currentDate))) return [[date, 'overdue']];
-    // A past date covered only by an unfinished continuous task is not overdue
-    // until its end date. Today and future dates use the active marker.
-    if (date >= currentDate) return [[date, 'active']];
-    return [];
+    const markers = new Set(dayTasks.map(task => taskDateStatusMarker(task, date, currentDate)).filter(Boolean));
+    // A date can contain multiple independent assignments. Surface the state that
+    // needs attention first, while retaining a visible marker for every task day.
+    const marker = ['overdue', 'pending', 'active', 'completed'].find(value => markers.has(value));
+    return marker ? [[date, marker]] : [];
   }));
 }
 function taskTemplateJson(template, includeResource = false) {
@@ -1150,7 +1167,67 @@ function studentListFor(user) {
 const ASSESSMENT_SUBJECTS = new Set(['语文', '数学', '英语']);
 const ASSESSMENT_TYPES = new Set(['single_choice', 'multiple_choice', 'true_false', 'fill_blank', 'short_text', 'dictation', 'ordering', 'image_writing', 'audio_speaking']);
 const ASSESSMENT_MODES = new Set(['choice', 'text', 'multi_text', 'ordering', 'image', 'audio']);
+const IMPORTABLE_ASSESSMENT_TYPES = new Map([['单选题', 'single_choice'], ['多选题', 'multiple_choice'], ['判断题', 'true_false'], ['填空题', 'fill_blank'], ['简答题', 'short_text']]);
+const IMPORTABLE_ASSESSMENT_TYPE_LABELS = Object.fromEntries([...IMPORTABLE_ASSESSMENT_TYPES].map(([label, type]) => [type, label]));
 function parseJson(value, fallback = {}) { try { return value ? JSON.parse(value) : fallback; } catch { return fallback; } }
+function csvCells(text) {
+  const rows = []; let row = []; let cell = ''; let quoted = false;
+  for (let index = 0; index < String(text || '').length; index += 1) {
+    const char = text[index]; const next = text[index + 1];
+    if (char === '"' && quoted && next === '"') { cell += '"'; index += 1; continue; }
+    if (char === '"') { quoted = !quoted; continue; }
+    if (char === ',' && !quoted) { row.push(cell); cell = ''; continue; }
+    if ((char === '\n' || char === '\r') && !quoted) { if (char === '\r' && next === '\n') index += 1; row.push(cell); if (row.some(value => value.trim())) rows.push(row); row = []; cell = ''; continue; }
+    cell += char;
+  }
+  row.push(cell); if (row.some(value => value.trim())) rows.push(row); return rows;
+}
+function csvEscape(value) { const text = String(value ?? ''); return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text; }
+function assessmentQuestionImportTemplate() {
+  return [
+    ['题目名称', '科目', '题型', '题干内容', '选项（用｜分隔）', '正确答案（多选用｜分隔）', '参考答案/评分要点', '答案解析', '分值', '允许学生上传附件（是/否）', '发布状态（草稿/启用）'],
+    ['词义选择示例', '语文', '单选题', '“津津有味”最接近下面哪个意思？', '很有兴趣｜很伤心｜很害怕', '很有兴趣', '', '津津有味表示很有兴趣的样子。', '1', '否', '草稿'],
+    ['英语多选示例', '英语', '多选题', '请选择表示水果的单词。', 'apple｜book｜banana', 'apple｜banana', '', 'apple 和 banana 都表示水果。', '2', '否', '草稿'],
+    ['判断示例', '数学', '判断题', '3 × 4 = 12。', '', '正确', '', '3 个 4 相加等于 12。', '1', '否', '草稿'],
+    ['填空示例', '语文', '填空题', '请填写：春眠不觉____。', '', '晓', '', '诗句是“春眠不觉晓”。', '1', '否', '草稿'],
+    ['简答示例', '语文', '简答题', '请说说故事中你最喜欢的人物和原因。', '', '', '围绕人物特点和故事内容说明理由', '说清人物和理由即可。', '5', '是', '草稿']
+  ].map(row => row.map(csvEscape).join(',')).join('\r\n');
+}
+function assessmentImportRows(text) {
+  const [headerRow, ...dataRows] = csvCells(text); const headers = (headerRow || []).map(value => value.replace(/^\ufeff/, '').trim());
+  const required = ['题目名称', '科目', '题型', '题干内容', '分值'];
+  if (!required.every(name => headers.includes(name))) throw new Error(`模板缺少必填列：${required.filter(name => !headers.includes(name)).join('、')}`);
+  return dataRows.map((cells, index) => Object.fromEntries(headers.map((header, column) => [header, String(cells[column] || '').trim()]).filter(([header]) => header))).filter(row => Object.values(row).some(Boolean)).map((row, index) => ({ row, rowNumber: index + 2 }));
+}
+function assessmentImportPayload(row) {
+  const questionType = IMPORTABLE_ASSESSMENT_TYPES.get(row['题型']);
+  const options = String(row['选项（用｜分隔）'] || '').split('｜').map(value => clean(value, 300)).filter(Boolean);
+  const answers = String(row['正确答案（多选用｜分隔）'] || '').split('｜').map(value => clean(value, 300)).filter(Boolean);
+  const shortText = questionType === 'short_text';
+  return {
+    name: clean(row.题目名称, 160), subject: clean(row.科目, 12), questionType,
+    promptText: clean(row.题干内容, 3000), options: questionType === 'true_false' ? ['正确', '错误'] : options,
+    correctAnswer: questionType === 'multiple_choice' ? answers : (answers[0] || (shortText ? clean(row['参考答案/评分要点'], 2000) : '')),
+    explanation: clean(row.答案解析, 2000), score: Number(row.分值),
+    allowAttachment: ['是', 'yes', 'true', '1'].includes(String(row['允许学生上传附件（是/否）'] || '').trim().toLowerCase()),
+    status: ['启用', '已发布', 'published'].includes(String(row['发布状态（草稿/启用）'] || '').trim()) ? 'published' : 'draft',
+    gradingMode: shortText ? 'manual' : 'auto'
+  };
+}
+function validateAssessmentImportRow(row, rowNumber) {
+  const errors = []; const payload = assessmentImportPayload(row); const label = `第 ${rowNumber} 行`;
+  if (!payload.name) errors.push(`${label}：题目名称不能为空`);
+  if (!ASSESSMENT_SUBJECTS.has(payload.subject)) errors.push(`${label}：科目仅支持语文、数学、英语`);
+  if (!payload.questionType) errors.push(`${label}：题型仅支持单选题、多选题、判断题、填空题、简答题`);
+  if (!Number.isSafeInteger(payload.score) || payload.score < 1 || payload.score > 100) errors.push(`${label}：分值需为 1 至 100 的整数`);
+  if (['single_choice', 'multiple_choice'].includes(payload.questionType) && payload.options.length < 2) errors.push(`${label}：${row.题型}至少需要两个选项`);
+  if (payload.questionType === 'true_false' && !['正确', '错误'].includes(payload.correctAnswer)) errors.push(`${label}：判断题正确答案只能填写“正确”或“错误”`);
+  const selectedAnswers = Array.isArray(payload.correctAnswer) ? payload.correctAnswer : [payload.correctAnswer].filter(Boolean);
+  if (['single_choice', 'multiple_choice'].includes(payload.questionType) && !selectedAnswers.length) errors.push(`${label}：请选择正确答案`);
+  if (['single_choice', 'multiple_choice'].includes(payload.questionType) && selectedAnswers.some(answer => !payload.options.includes(answer))) errors.push(`${label}：正确答案必须来自选项内容`);
+  if (payload.questionType !== 'short_text' && !selectedAnswers.length) errors.push(`${label}：请填写正确答案`);
+  return { payload, errors };
+}
 function assessmentPagination(url, defaultPageSize = 10) {
   const requestedPage = Number.parseInt(url.searchParams.get('page') || '1', 10);
   const requestedPageSize = Number.parseInt(url.searchParams.get('pageSize') || String(defaultPageSize), 10);
@@ -1162,6 +1239,7 @@ function assessmentPaginationMeta(total, { page, pageSize }) {
   return { page, pageSize, total: Number(total || 0), totalPages: Math.max(1, Math.ceil(Number(total || 0) / pageSize)) };
 }
 function assessmentSnapshot(row) { return { name: row.name, subject: row.subject, grade: row.grade, difficulty: row.difficulty, tags: row.tags ? row.tags.split(',').filter(Boolean) : [], questionType: row.question_type, answerMode: row.answer_mode, prompt: parseJson(row.prompt_json), answer: parseJson(row.answer_json), explanation: row.explanation, score: Number(row.score), gradingMode: row.grading_mode, gradingRules: parseJson(row.grading_rules_json), source: parseJson(row.source_snapshot_json), version: Number(row.current_version || 1) }; }
+function assessmentPaperItemSnapshot(row, score) { return { ...assessmentSnapshot(row), score: Number(score) }; }
 function assessmentQuestionJson(row, reveal = true) { const item = assessmentSnapshot(row); if (!reveal) delete item.answer; return { id: row.id, ...item, status: row.status, creatorId: row.creator_id, createdAt: row.created_at, updatedAt: row.updated_at }; }
 function assessmentQuestionSummaryJson(row) { const question = assessmentQuestionJson(row, true); const attachments = question.source?.attachments; if (Array.isArray(attachments)) question.source = { ...question.source, attachments: attachments.map(({ name, mime, kind }) => ({ name, mime, kind })) }; return question; }
 function assessmentPaperJson(row, includeItems = true) { const result = { id: row.id, name: row.name, subject: row.subject, grade: row.grade, description: row.description, duration: row.duration_minutes, passScore: row.pass_score, explanationTiming: row.explanation_timing, allowRetry: Boolean(row.allow_retry), retryLimit: Number(row.retry_limit || 0), status: row.status, version: Number(row.current_version || 1), creatorId: row.creator_id, createdAt: row.created_at, updatedAt: row.updated_at, totalScore: 0, questionCount: 0, requiresReview: false }; if (includeItems) { result.questions = db.prepare('SELECT * FROM assessment_paper_items WHERE paper_id = ? ORDER BY sort_order').all(row.id).map(item => { const snapshot = parseJson(item.snapshot_json); const score = Number(item.score || snapshot.score || 0); result.totalScore += score; result.questionCount += 1; result.requiresReview ||= snapshot.gradingMode === 'manual'; return { ...snapshot, id: item.question_id, version: item.question_version, score }; }); } return result; }
@@ -1175,7 +1253,7 @@ function assessmentPaperSummaryJson(row) {
   paper.requiresReview = Boolean(summary?.requires_review);
   return paper;
 }
-function assessmentPaperItemSpecs(body = {}, fallback = []) { const source = Array.isArray(body.items) ? body.items : Array.isArray(body.questionIds) ? body.questionIds.map(questionId => ({ questionId })) : fallback.map(questionId => ({ questionId })); const used = new Set(); return source.map(item => ({ questionId: Number(item?.questionId ?? item?.id ?? item), score: item?.score === '' || item?.score === undefined ? null : Number(item.score) })).filter(item => Number.isSafeInteger(item.questionId) && item.questionId > 0 && !used.has(item.questionId) && (used.add(item.questionId) || true)).slice(0, 50); }
+function assessmentPaperItemSpecs(body = {}, fallback = []) { const source = Array.isArray(body.items) ? body.items : Array.isArray(body.questionIds) ? body.questionIds.map(questionId => ({ questionId })) : fallback; const itemScores = body.itemScores && typeof body.itemScores === 'object' ? body.itemScores : {}; const used = new Set(); return source.map(item => { const questionId = Number(item?.questionId ?? item?.id ?? item); const suppliedScore = item?.score === undefined ? itemScores[questionId] : item.score; return { questionId, score: suppliedScore === '' || suppliedScore === undefined ? null : Number(suppliedScore) }; }).filter(item => Number.isSafeInteger(item.questionId) && item.questionId > 0 && !used.has(item.questionId) && (used.add(item.questionId) || true)).slice(0, 50); }
 function assessmentLibraryAccess(user, libraryId, write = false) { const row = db.prepare('SELECT * FROM assessment_resource_libraries WHERE id = ?').get(libraryId); if (!row) return null; if (user.role === 'admin' || (!write && row.visibility === 'public') || Number(row.creator_id) === Number(user.id)) return row; return null; }
 function assessmentQuestionAccess(user, questionId, write = false) { const row = db.prepare('SELECT * FROM assessment_questions WHERE id = ?').get(questionId); if (!row) return null; if (user.role === 'admin' || Number(row.creator_id) === Number(user.id) || (!write && row.status === 'published')) return row; return null; }
 function assessmentPaperAccess(user, paperId, write = false) { const row = db.prepare('SELECT * FROM assessment_papers WHERE id = ?').get(paperId); if (!row) return null; if (user.role === 'admin' || Number(row.creator_id) === Number(user.id)) return row; return null; }
@@ -1195,7 +1273,16 @@ function assessmentQuestionInput(body = {}, current = null) {
 function assessmentAnswerValue(value) { return typeof value === 'string' ? value.trim().replace(/[\u3000]/g, ' ').replace(/\s+/g, ' ') : value; }
 function assessmentAnswersEqual(expected, actual, mode = 'text') { if (Array.isArray(expected) || Array.isArray(actual)) { const a = (Array.isArray(actual) ? actual : [actual]).map(assessmentAnswerValue); const e = (Array.isArray(expected) ? expected : [expected]).map(assessmentAnswerValue); return mode === 'choice' ? a.length === e.length && a.every(item => e.includes(item)) : a.length === e.length && a.every((item, index) => item === e[index]); } return assessmentAnswerValue(expected) === assessmentAnswerValue(actual); }
 function gradeAssessmentQuestion(question, answer) { const expected = question.answer || {}; const value = answer?.value ?? answer; if (question.gradingMode !== 'auto') return { result: 'manual', score: null }; if (question.questionType === 'multiple_choice') { const correct = assessmentAnswersEqual(expected.correct, value, 'choice'); return { result: correct ? 'correct' : 'wrong', score: correct ? question.score : 0 }; } if (question.questionType === 'ordering') { const correct = assessmentAnswersEqual(expected.order, value); return { result: correct ? 'correct' : 'wrong', score: correct ? question.score : 0 }; } const accepted = [expected.correct, ...(expected.acceptable || [])].filter(item => item !== '' && item !== null); const correct = accepted.some(item => assessmentAnswersEqual(item, value, question.answerMode === 'choice' ? 'choice' : 'text')); return { result: correct ? 'correct' : 'wrong', score: correct ? question.score : 0 }; }
-function assessmentAssignmentJson(row, includeQuestions = false, reveal = false) { const attempt = db.prepare('SELECT * FROM assessment_attempts WHERE assignment_id = ? ORDER BY version DESC LIMIT 1').get(row.id); const review = attempt ? db.prepare("SELECT message FROM assessment_reviews WHERE attempt_id = ? AND action = 'approve' ORDER BY id DESC LIMIT 1").get(attempt.id) : null; const passScore = row.paper_id ? Number(db.prepare('SELECT pass_score FROM assessment_papers WHERE id = ?').get(row.paper_id)?.pass_score || 0) : 0; const attemptScore = Number(attempt?.final_score ?? attempt?.auto_score ?? 0); const canRetry = Boolean(row.allow_retry) && passScore > 0 && attempt && ['auto_graded', 'finalized'].includes(attempt.status) && attemptScore < passScore && Number(attempt.version) <= Number(row.retry_limit || 0); const result = { id: row.id, taskId: row.student_task_id, studentId: row.student_id, name: row.name, subject: row.subject, description: row.description, dueDate: row.due_date, deadline: row.deadline, duration: row.duration_minutes, stars: Number(row.stars), petExpWeight: Number(row.pet_exp_weight || 0), needsReview: Boolean(row.needs_review), explanationTiming: row.explanation_timing, allowRetry: Boolean(row.allow_retry), retryLimit: Number(row.retry_limit || 0), canRetry, reviewMessage: review?.message || '', sourceType: row.source_type, paperId: row.paper_id, paperVersion: row.paper_version, passScore, taskStatus: row.task_status, questionCount: Number(db.prepare('SELECT COUNT(*) AS total FROM assessment_assignment_questions WHERE assignment_id = ?').get(row.id).total || 0), attempt: attempt ? { id: attempt.id, version: attempt.version, status: attempt.status, autoScore: attempt.auto_score, manualScore: attempt.manual_score, finalScore: attempt.final_score, totalScore: attempt.total_score, startedAt: attempt.started_at, submittedAt: attempt.submitted_at } : null }; if (includeQuestions) result.questions = db.prepare('SELECT * FROM assessment_assignment_questions WHERE assignment_id = ? ORDER BY sort_order').all(row.id).map(question => { const snapshot = parseJson(question.snapshot_json); if (!reveal) delete snapshot.answer; const answer = attempt && db.prepare('SELECT * FROM assessment_answers WHERE attempt_id = ? AND assignment_question_id = ?').get(attempt.id, question.id); return { ...snapshot, id: question.id, questionId: question.question_id, sortOrder: question.sort_order, score: Number(question.score), ...(reveal ? { correctAnswer: snapshot.answer || null } : {}), savedAnswer: answer ? parseJson(answer.answer_json) : null, savedAttachments: answer ? parseJson(answer.attachment_json, []) : [], autoResult: answer?.auto_result || 'ungraded', autoScore: answer?.auto_score ?? null, finalScore: answer?.final_score ?? null }; }); return result; }
+function assessmentCanRetry(row, attempt) {
+  const passScore = row.paper_id ? Number(db.prepare('SELECT pass_score FROM assessment_papers WHERE id = ?').get(row.paper_id)?.pass_score || 0) : 0;
+  const attemptScore = Number(attempt?.final_score ?? attempt?.auto_score ?? 0);
+  return Boolean(row.allow_retry) && passScore > 0 && attempt && ['auto_graded', 'finalized'].includes(attempt.status) && attemptScore < passScore && Number(attempt.version) <= Number(row.retry_limit || 0);
+}
+function studentAssessmentAnswersRevealed(row) {
+  const attempt = db.prepare('SELECT * FROM assessment_attempts WHERE assignment_id = ? ORDER BY version DESC LIMIT 1').get(row.id);
+  return row.task_status === 'completed' && !assessmentCanRetry(row, attempt);
+}
+function assessmentAssignmentJson(row, includeQuestions = false, reveal = false) { const attempt = db.prepare('SELECT * FROM assessment_attempts WHERE assignment_id = ? ORDER BY version DESC LIMIT 1').get(row.id); const review = attempt ? db.prepare("SELECT message FROM assessment_reviews WHERE attempt_id = ? AND action = 'approve' ORDER BY id DESC LIMIT 1").get(attempt.id) : null; const passScore = row.paper_id ? Number(db.prepare('SELECT pass_score FROM assessment_papers WHERE id = ?').get(row.paper_id)?.pass_score || 0) : 0; const canRetry = assessmentCanRetry(row, attempt); const canWithdraw = ['not_started', 'in_progress'].includes(row.task_status) && !attempt?.submitted_at; const result = { id: row.id, taskId: row.student_task_id, studentId: row.student_id, name: row.name, subject: row.subject, description: row.description, dueDate: row.due_date, deadline: row.deadline, duration: row.duration_minutes, stars: Number(row.stars), petExpWeight: Number(row.pet_exp_weight || 0), needsReview: Boolean(row.needs_review), explanationTiming: row.explanation_timing, allowRetry: Boolean(row.allow_retry), retryLimit: Number(row.retry_limit || 0), canRetry, canWithdraw, reviewMessage: review?.message || '', sourceType: row.source_type, paperId: row.paper_id, paperVersion: row.paper_version, passScore, taskStatus: row.task_status, questionCount: Number(db.prepare('SELECT COUNT(*) AS total FROM assessment_assignment_questions WHERE assignment_id = ?').get(row.id).total || 0), attempt: attempt ? { id: attempt.id, version: attempt.version, status: attempt.status, autoScore: attempt.auto_score, manualScore: attempt.manual_score, finalScore: attempt.final_score, totalScore: attempt.total_score, startedAt: attempt.started_at, submittedAt: attempt.submitted_at } : null }; if (includeQuestions) result.questions = db.prepare('SELECT * FROM assessment_assignment_questions WHERE assignment_id = ? ORDER BY sort_order').all(row.id).map(question => { const snapshot = parseJson(question.snapshot_json); if (!reveal) { delete snapshot.answer; delete snapshot.explanation; } const answer = attempt && db.prepare('SELECT * FROM assessment_answers WHERE attempt_id = ? AND assignment_question_id = ?').get(attempt.id, question.id); return { ...snapshot, id: question.id, questionId: question.question_id, sortOrder: question.sort_order, score: Number(question.score), ...(reveal ? { correctAnswer: snapshot.answer || null } : {}), savedAnswer: answer ? parseJson(answer.answer_json) : null, savedAttachments: answer ? parseJson(answer.attachment_json, []) : [], autoResult: answer?.auto_result || 'ungraded', autoScore: answer?.auto_score ?? null, finalScore: answer?.final_score ?? null }; }); return result; }
 function assessmentAssignmentRow(id) { return db.prepare(`SELECT assessment_assignments.*, tasks.status AS task_status FROM assessment_assignments JOIN tasks ON tasks.id = assessment_assignments.student_task_id WHERE assessment_assignments.id = ?`).get(id); }
 function assessmentTaskRow(taskId) { return db.prepare(`SELECT assessment_assignments.*, tasks.status AS task_status FROM assessment_assignments JOIN tasks ON tasks.id = assessment_assignments.student_task_id WHERE tasks.id = ?`).get(taskId); }
 function assessmentVisibleToStudent(user, assignment) { return assignment && Number(assignment.student_id) === Number(user.id); }
@@ -1472,7 +1559,7 @@ const server = createServer(async (req, res) => {
       const user = requireUser(req, res); if (!user || user.role !== 'student') return;
       const taskId = Number(url.pathname.split('/').pop()); const row = assessmentTaskRow(taskId);
       if (!assessmentVisibleToStudent(user, row)) { bad(res, 404, '评测不存在'); return; }
-      json(res, 200, { assessment: assessmentAssignmentJson(row, true, row.task_status === 'completed') }); return;
+      json(res, 200, { assessment: assessmentAssignmentJson(row, true, studentAssessmentAnswersRevealed(row)) }); return;
     }
     if (req.method === 'POST' && /^\/api\/student\/assessments\/\d+\/start$/.test(url.pathname)) {
       const user = requireUser(req, res); if (!user || user.role !== 'student') return;
@@ -1509,13 +1596,13 @@ const server = createServer(async (req, res) => {
       if (missing.length) { bad(res, 400, `还有 ${missing.length} 道题没有完成，再检查一下吧（第 ${missing.join('、')} 题）`); return; }
       const needsReview = Boolean(row.needs_review) || hasManual; const status = needsReview ? 'pending_review' : 'auto_graded'; const finalScore = needsReview ? null : autoScore; const timestamp = now(); db.prepare('UPDATE assessment_attempts SET status=?, submitted_at=?, auto_score=?, final_score=?, submit_request_id=?, updated_at=? WHERE id=?').run(status, timestamp, autoScore, finalScore, requestId, timestamp, attempt.id); db.prepare("UPDATE tasks SET status=?, submitted_at=?, draft_updated_at=? WHERE id=?").run(needsReview ? 'pending_review' : 'completed', timestamp, timestamp, taskId);
       if (!needsReview) { db.prepare('DELETE FROM rewards WHERE task_id = ?').run(taskId); db.prepare('INSERT INTO rewards (student_id,task_id,stars,message,created_at) VALUES (?,?,?,?,?)').run(user.id, taskId, row.stars, '评测完成，做得很棒！', timestamp); const pet = activePetForStudent(user.id); publishPetEvent({ eventType: 'ASSESSMENT_FINALIZED', sourceType: 'assessment_complete', sourceId: String(taskId), studentId: user.id, petId: pet?.id || null, businessDate: row.due_date, requestedDelta: 10 * Math.max(0, Number(row.pet_exp_weight) || 0), occurredAt: timestamp, reason: `完成评测：${row.name}` }); }
-      const latest = assessmentTaskRow(taskId); json(res, 200, { assessment: assessmentAssignmentJson(latest, true, !needsReview) }); return;
+      const latest = assessmentTaskRow(taskId); json(res, 200, { assessment: assessmentAssignmentJson(latest, true, studentAssessmentAnswersRevealed(latest)) }); return;
     }
     if (req.method === 'GET' && /^\/api\/student\/assessments\/\d+\/result$/.test(url.pathname)) {
       const user = requireUser(req, res); if (!user || user.role !== 'student') return;
       const taskId = Number(url.pathname.split('/')[4]); const row = assessmentTaskRow(taskId); if (!assessmentVisibleToStudent(user, row)) { bad(res, 404, '评测不存在'); return; }
       const attempt = db.prepare("SELECT * FROM assessment_attempts WHERE assignment_id = ? AND status IN ('auto_graded','finalized') ORDER BY version DESC LIMIT 1").get(row.id); if (!attempt) { bad(res, 409, '评测结果尚未生成'); return; }
-      json(res, 200, { assessment: assessmentAssignmentJson(row, true, true) }); return;
+      json(res, 200, { assessment: assessmentAssignmentJson(row, true, studentAssessmentAnswersRevealed(row)) }); return;
     }
     if (req.method === 'POST' && /^\/api\/student\/assessments\/\d+\/retry$/.test(url.pathname)) {
       const user = requireUser(req, res); if (!user || user.role !== 'student') return;
@@ -1558,17 +1645,41 @@ const server = createServer(async (req, res) => {
       const existing = new Set(db.prepare("SELECT lower(content) AS content FROM assessment_resource_items WHERE library_id = ? AND status = 'enabled'").all(libraryId).map(item => item.content)); const invalid = []; const accepted = []; supplied.forEach((item, index) => { const content = clean(item.content || item.text || item.word || item.sentence, 1000); const key = content.toLowerCase(); if (!content || existing.has(key)) invalid.push({ row: index + 1, reason: !content ? '主内容不能为空' : '主内容重复' }); else { existing.add(key); accepted.push({ content, extra: item.extra || {}, tags: clean(item.tags, 300), difficulty: clean(item.difficulty, 20), note: clean(item.note, 500) }); } }); if (body.validateOnly === true) { json(res, 200, { valid: invalid.length === 0, accepted: accepted.length, errors: invalid }); return; }
       const timestamp = now(); const insert = db.prepare('INSERT INTO assessment_resource_items (library_id,content,extra_json,tags,difficulty,note,sort_order,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,\'enabled\',1,?,?)'); const baseOrder = Number(db.prepare('SELECT COALESCE(MAX(sort_order),0) AS value FROM assessment_resource_items WHERE library_id=?').get(libraryId).value || 0); db.exec('BEGIN'); try { accepted.forEach((item, index) => insert.run(libraryId, item.content, JSON.stringify(item.extra), item.tags, item.difficulty, item.note, baseOrder + index + 1, timestamp, timestamp)); db.prepare('UPDATE assessment_resource_libraries SET version=version+1,updated_at=? WHERE id=?').run(timestamp, libraryId); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; } json(res, 201, { inserted: accepted.length, skipped: invalid.length, errors: invalid }); return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/parent/assessment-questions/import-template') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      csv(res, 'learning-planet-question-import-template.csv', assessmentQuestionImportTemplate()); return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/parent/assessment-questions/export') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const subject = clean(url.searchParams.get('subject'), 12); const conditions = [user.role === 'admin' ? '1=1' : 'creator_id = ?']; const params = user.role === 'admin' ? [] : [user.id];
+      if (subject) { conditions.push('subject = ?'); params.push(subject); }
+      const rows = db.prepare(`SELECT * FROM assessment_questions WHERE ${conditions.join(' AND ')} ORDER BY updated_at DESC, id DESC`).all(...params);
+      const header = ['题目名称', '科目', '题型', '题干内容', '选项（用｜分隔）', '正确答案（多选用｜分隔）', '参考答案/评分要点', '答案解析', '分值', '允许学生上传附件（是/否）', '发布状态（草稿/启用）'];
+      const records = rows.map(row => { const question = assessmentQuestionJson(row, true); const options = (question.prompt?.options || []).map(option => typeof option === 'object' ? option.text : option).join('｜'); const answer = question.answer?.correct; const answerText = Array.isArray(answer) ? answer.join('｜') : String(answer || ''); const isShortText = question.questionType === 'short_text'; return [question.name, question.subject, IMPORTABLE_ASSESSMENT_TYPE_LABELS[question.questionType] || question.questionType, question.prompt?.text || '', options, isShortText ? '' : answerText, isShortText ? answerText : '', question.explanation || '', question.score, question.prompt?.allowAttachment ? '是' : '否', question.status === 'published' ? '启用' : '草稿']; });
+      csv(res, 'learning-planet-questions-export.csv', [header, ...records].map(record => record.map(csvEscape).join(',')).join('\r\n')); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/parent/assessment-questions/import') {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const body = await readBody(req, 2 * 1024 * 1024); const text = String(body.csvText || '');
+      let rows; try { rows = assessmentImportRows(text); } catch (error) { bad(res, 400, error.message); return; }
+      if (!rows.length || rows.length > 200) { bad(res, 400, '导入题目不能为空，且一次最多 200 道'); return; }
+      const prepared = rows.map(({ row, rowNumber }) => validateAssessmentImportRow(row, rowNumber)); const errors = prepared.flatMap(item => item.errors);
+      if (body.dryRun !== false) { json(res, 200, { valid: errors.length === 0, total: rows.length, validCount: prepared.filter(item => !item.errors.length).length, errors }); return; }
+      if (errors.length) { bad(res, 400, errors.join('；')); return; }
+      const timestamp = now(); const insert = db.prepare('INSERT INTO assessment_questions (name,subject,grade,difficulty,tags,question_type,answer_mode,prompt_json,answer_json,explanation,score,grading_mode,grading_rules_json,source_snapshot_json,status,current_version,creator_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)'); const insertVersion = db.prepare('INSERT INTO assessment_question_versions (question_id,version,snapshot_json,change_note,creator_id,created_at) VALUES (?,?,?,?,?,?)'); const created = [];
+      db.exec('BEGIN'); try { prepared.forEach(({ payload }) => { const input = assessmentQuestionInput(payload); const result = insert.run(payload.name, input.subject, input.grade, input.difficulty, input.tags, input.questionType, input.answerMode, input.promptJson, input.answerJson, input.explanation, input.score, input.gradingMode, input.gradingRulesJson, input.sourceSnapshotJson, payload.status, user.id, timestamp, timestamp); const id = Number(result.lastInsertRowid); insertVersion.run(id, 1, JSON.stringify({ ...input, name: payload.name }), '模板导入', user.id, timestamp); created.push(id); }); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; }
+      json(res, 201, { imported: created.length, ids: created }); return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/parent/assessment-questions') {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const conditions = user.role === 'admin' ? [] : ['(creator_id = ? OR status = \'published\')']; const params = user.role === 'admin' ? [] : [user.id]; const subject = clean(url.searchParams.get('subject'), 12); const status = clean(url.searchParams.get('status'), 12); const q = clean(url.searchParams.get('q'), 120); const paging = assessmentPagination(url); if (subject) { conditions.push('subject = ?'); params.push(subject); } if (status) { conditions.push('status = ?'); params.push(status); } if (q) { conditions.push('(name LIKE ? OR prompt_json LIKE ? OR tags LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); } const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''; const total = Number(db.prepare(`SELECT COUNT(*) AS total FROM assessment_questions ${where}`).get(...params).total || 0); const rows = db.prepare(`SELECT * FROM assessment_questions ${where} ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?`).all(...params, paging.pageSize, paging.offset); json(res, 200, { questions: rows.map(assessmentQuestionSummaryJson), pagination: assessmentPaginationMeta(total, paging) }); return;
     }
     if (req.method === 'POST' && url.pathname === '/api/parent/assessment-questions') {
-      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const body = await readBody(req, 9 * 1024 * 1024); const input = assessmentQuestionInput(body); const prompt = parseJson(input.promptJson); if (!ASSESSMENT_SUBJECTS.has(input.subject) || !ASSESSMENT_TYPES.has(input.questionType) || !ASSESSMENT_MODES.has(input.answerMode) || !prompt.text) { bad(res, 400, '请填写有效的科目、题型、作答方式和题干'); return; } if (!Number.isSafeInteger(input.score) || input.score < 1 || input.score > 100) { bad(res, 400, '分值需为 1 至 100 的整数'); return; } const status = body.status === 'published' ? 'published' : 'draft'; const timestamp = now(); const name = clean(body.name, 160); const result = db.prepare('INSERT INTO assessment_questions (name,subject,grade,difficulty,tags,question_type,answer_mode,prompt_json,answer_json,explanation,score,grading_mode,grading_rules_json,source_snapshot_json,status,current_version,creator_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)').run(name, input.subject, input.grade, input.difficulty, input.tags, input.questionType, input.answerMode, input.promptJson, input.answerJson, input.explanation, input.score, input.gradingMode, input.gradingRulesJson, input.sourceSnapshotJson, status, user.id, timestamp, timestamp); const id = Number(result.lastInsertRowid); db.prepare('INSERT INTO assessment_question_versions (question_id,version,snapshot_json,change_note,creator_id,created_at) VALUES (?,?,?,?,?,?)').run(id, 1, JSON.stringify({ ...input, name }), '初始版本', user.id, timestamp); const row = db.prepare('SELECT * FROM assessment_questions WHERE id=?').get(id); json(res, 201, { question: assessmentQuestionSummaryJson(row) }); return;
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const body = await readBody(req, 9 * 1024 * 1024); const input = assessmentQuestionInput(body); if (!ASSESSMENT_SUBJECTS.has(input.subject) || !ASSESSMENT_TYPES.has(input.questionType) || !ASSESSMENT_MODES.has(input.answerMode)) { bad(res, 400, '请填写有效的科目、题型和作答方式'); return; } if (!Number.isSafeInteger(input.score) || input.score < 1 || input.score > 100) { bad(res, 400, '分值需为 1 至 100 的整数'); return; } const status = body.status === 'published' ? 'published' : 'draft'; const timestamp = now(); const name = clean(body.name, 160); const result = db.prepare('INSERT INTO assessment_questions (name,subject,grade,difficulty,tags,question_type,answer_mode,prompt_json,answer_json,explanation,score,grading_mode,grading_rules_json,source_snapshot_json,status,current_version,creator_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)').run(name, input.subject, input.grade, input.difficulty, input.tags, input.questionType, input.answerMode, input.promptJson, input.answerJson, input.explanation, input.score, input.gradingMode, input.gradingRulesJson, input.sourceSnapshotJson, status, user.id, timestamp, timestamp); const id = Number(result.lastInsertRowid); db.prepare('INSERT INTO assessment_question_versions (question_id,version,snapshot_json,change_note,creator_id,created_at) VALUES (?,?,?,?,?,?)').run(id, 1, JSON.stringify({ ...input, name }), '初始版本', user.id, timestamp); const row = db.prepare('SELECT * FROM assessment_questions WHERE id=?').get(id); json(res, 201, { question: assessmentQuestionSummaryJson(row) }); return;
     }
     if (req.method === 'GET' && /^\/api\/parent\/assessment-questions\/\d+$/.test(url.pathname)) {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop()); const row = assessmentQuestionAccess(user, id); if (!row) { bad(res, 404, '题目不存在或无权查看'); return; } json(res, 200, { question: assessmentQuestionJson(row, true), versions: db.prepare('SELECT version,change_note,created_at FROM assessment_question_versions WHERE question_id=? ORDER BY version DESC').all(id) }); return;
     }
     if (req.method === 'PATCH' && /^\/api\/parent\/assessment-questions\/\d+$/.test(url.pathname)) {
-      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop()); const current = assessmentQuestionAccess(user, id, true); if (!current) { bad(res, 404, '题目不存在或无权修改'); return; } const body = await readBody(req, 9 * 1024 * 1024); const input = assessmentQuestionInput(body, current); const prompt = parseJson(input.promptJson); if (!ASSESSMENT_SUBJECTS.has(input.subject) || !ASSESSMENT_TYPES.has(input.questionType) || !ASSESSMENT_MODES.has(input.answerMode) || !prompt.text) { bad(res, 400, '题目内容不完整'); return; } const version = Number(current.current_version || 1) + 1; const timestamp = now(); const name = clean(body.name ?? current.name, 160); db.prepare('UPDATE assessment_questions SET name=?,subject=?,grade=?,difficulty=?,tags=?,question_type=?,answer_mode=?,prompt_json=?,answer_json=?,explanation=?,score=?,grading_mode=?,grading_rules_json=?,source_snapshot_json=?,status=?,current_version=?,updated_at=? WHERE id=?').run(name, input.subject, input.grade, input.difficulty, input.tags, input.questionType, input.answerMode, input.promptJson, input.answerJson, input.explanation, input.score, input.gradingMode, input.gradingRulesJson, input.sourceSnapshotJson, ['draft','published','archived'].includes(body.status) ? body.status : current.status, version, timestamp, id); db.prepare('INSERT INTO assessment_question_versions (question_id,version,snapshot_json,change_note,creator_id,created_at) VALUES (?,?,?,?,?,?)').run(id, version, JSON.stringify({ ...input, name }), clean(body.changeNote, 200), user.id, timestamp); const row = db.prepare('SELECT * FROM assessment_questions WHERE id=?').get(id); json(res, 200, { question: assessmentQuestionSummaryJson(row) }); return;
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const id = Number(url.pathname.split('/').pop()); const current = assessmentQuestionAccess(user, id, true); if (!current) { bad(res, 404, '题目不存在或无权修改'); return; } const body = await readBody(req, 9 * 1024 * 1024); const input = assessmentQuestionInput(body, current); if (!ASSESSMENT_SUBJECTS.has(input.subject) || !ASSESSMENT_TYPES.has(input.questionType) || !ASSESSMENT_MODES.has(input.answerMode)) { bad(res, 400, '题目内容不完整'); return; } const version = Number(current.current_version || 1) + 1; const timestamp = now(); const name = clean(body.name ?? current.name, 160); db.prepare('UPDATE assessment_questions SET name=?,subject=?,grade=?,difficulty=?,tags=?,question_type=?,answer_mode=?,prompt_json=?,answer_json=?,explanation=?,score=?,grading_mode=?,grading_rules_json=?,source_snapshot_json=?,status=?,current_version=?,updated_at=? WHERE id=?').run(name, input.subject, input.grade, input.difficulty, input.tags, input.questionType, input.answerMode, input.promptJson, input.answerJson, input.explanation, input.score, input.gradingMode, input.gradingRulesJson, input.sourceSnapshotJson, ['draft','published','archived'].includes(body.status) ? body.status : current.status, version, timestamp, id); db.prepare('INSERT INTO assessment_question_versions (question_id,version,snapshot_json,change_note,creator_id,created_at) VALUES (?,?,?,?,?,?)').run(id, version, JSON.stringify({ ...input, name }), clean(body.changeNote, 200), user.id, timestamp); const row = db.prepare('SELECT * FROM assessment_questions WHERE id=?').get(id); json(res, 200, { question: assessmentQuestionSummaryJson(row) }); return;
     }
     if (req.method === 'DELETE' && /^\/api\/parent\/assessment-questions\/\d+$/.test(url.pathname)) {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
@@ -1593,7 +1704,7 @@ const server = createServer(async (req, res) => {
       const timestamp = now(); const status = body.status === 'draft' ? 'draft' : 'published';
       const result = db.prepare('INSERT INTO assessment_papers (name,subject,grade,description,duration_minutes,pass_score,explanation_timing,allow_retry,retry_limit,status,current_version,creator_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?,?)').run(name, subject, clean(body.grade, 30), clean(body.description, 600), Number(body.duration || 0) || null, Number(body.passScore || 0) || null, ['after_submit','after_review','never'].includes(body.explanationTiming) ? body.explanationTiming : 'after_review', body.allowRetry === true ? 1 : 0, body.allowRetry === true ? Math.min(1, Number(body.retryLimit || 1)) : 0, status, user.id, timestamp, timestamp);
       const paperId = Number(result.lastInsertRowid); const insert = db.prepare('INSERT INTO assessment_paper_items (paper_id,question_id,question_version,sort_order,score,snapshot_json) VALUES (?,?,?,?,?,?)');
-      questions.forEach((question, index) => { const score = specs[index].score ?? Number(question.score); insert.run(paperId, question.id, question.current_version, index + 1, score, JSON.stringify(assessmentSnapshot(question))); });
+      questions.forEach((question, index) => { const score = specs[index].score ?? Number(question.score); insert.run(paperId, question.id, question.current_version, index + 1, score, JSON.stringify(assessmentPaperItemSnapshot(question, score))); });
       const row = db.prepare('SELECT * FROM assessment_papers WHERE id=?').get(paperId); json(res, 201, { paper: assessmentPaperSummaryJson(row) }); return;
     }
     if (req.method === 'GET' && /^\/api\/parent\/assessment-papers\/\d+$/.test(url.pathname)) {
@@ -1602,13 +1713,13 @@ const server = createServer(async (req, res) => {
     if (req.method === 'PATCH' && /^\/api\/parent\/assessment-papers\/\d+$/.test(url.pathname)) {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
       const id = Number(url.pathname.split('/').pop()); const current = assessmentPaperAccess(user, id, true); if (!current) { bad(res, 404, '题单不存在或无权修改'); return; }
-      const body = await readBody(req, 512 * 1024); const fallback = db.prepare('SELECT question_id FROM assessment_paper_items WHERE paper_id=? ORDER BY sort_order').all(id).map(item => item.question_id); const specs = assessmentPaperItemSpecs(body, fallback); const ids = specs.map(item => item.questionId);
+      const body = await readBody(req, 512 * 1024); const fallback = db.prepare('SELECT question_id,score FROM assessment_paper_items WHERE paper_id=? ORDER BY sort_order').all(id).map(item => ({ questionId: item.question_id, score: Number(item.score) })); const specs = assessmentPaperItemSpecs(body, fallback); const ids = specs.map(item => item.questionId);
       const subject = current.subject; if (!ASSESSMENT_SUBJECTS.has(subject) || !ids.length || ids.length > 50) { bad(res, 400, '题单需要有效科目和 1 至 50 道题目'); return; }
       const questions = ids.map(questionId => assessmentQuestionAccess(user, questionId)).filter(Boolean); if (questions.length !== ids.length || questions.some(question => question.subject !== subject || question.status !== 'published')) { bad(res, 400, '题单只能包含同一科目的已发布题目'); return; }
       if (specs.some(item => item.score !== null && (!Number.isSafeInteger(item.score) || item.score < 1 || item.score > 100))) { bad(res, 400, '题目分值需为 1 至 100 的整数'); return; }
       const timestamp = now(); const version = Number(current.current_version || 1) + 1; const status = ['draft','published','archived'].includes(body.status) ? body.status : current.status;
       db.prepare('UPDATE assessment_papers SET name=?,subject=?,grade=?,description=?,duration_minutes=?,pass_score=?,explanation_timing=?,allow_retry=?,retry_limit=?,status=?,current_version=?,updated_at=? WHERE id=?').run(clean(body.name ?? current.name, 160), subject, clean(body.grade ?? current.grade, 30), clean(body.description ?? current.description, 600), Number(body.duration ?? current.duration_minutes) || null, Number(body.passScore ?? current.pass_score) || null, ['after_submit','after_review','never'].includes(body.explanationTiming) ? body.explanationTiming : current.explanation_timing, body.allowRetry === true ? 1 : body.allowRetry === false ? 0 : Number(current.allow_retry), body.allowRetry === true ? Math.min(1, Number(body.retryLimit || 1)) : body.allowRetry === false ? 0 : Number(current.retry_limit || 0), status, version, timestamp, id);
-      db.prepare('DELETE FROM assessment_paper_items WHERE paper_id=?').run(id); const insert = db.prepare('INSERT INTO assessment_paper_items (paper_id,question_id,question_version,sort_order,score,snapshot_json) VALUES (?,?,?,?,?,?)'); questions.forEach((question, index) => insert.run(id, question.id, question.current_version, index + 1, specs[index].score ?? Number(question.score), JSON.stringify(assessmentSnapshot(question))));
+      db.prepare('DELETE FROM assessment_paper_items WHERE paper_id=?').run(id); const insert = db.prepare('INSERT INTO assessment_paper_items (paper_id,question_id,question_version,sort_order,score,snapshot_json) VALUES (?,?,?,?,?,?)'); questions.forEach((question, index) => { const score = specs[index].score ?? Number(question.score); insert.run(id, question.id, question.current_version, index + 1, score, JSON.stringify(assessmentPaperItemSnapshot(question, score))); });
       const row = db.prepare('SELECT * FROM assessment_papers WHERE id=?').get(id); json(res, 200, { paper: assessmentPaperSummaryJson(row) }); return;
     }
     if (req.method === 'DELETE' && /^\/api\/parent\/assessment-papers\/\d+$/.test(url.pathname)) {
@@ -1621,7 +1732,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/parent/assessment-assignments') {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const body = await readBody(req, 512 * 1024); const studentIds = [...new Set((Array.isArray(body.studentIds) ? body.studentIds : [body.studentId]).map(Number).filter(Number.isSafeInteger))]; const dueDate = clean(body.dueDate || body.taskDate, 10) || businessDate(); const sourceType = body.paperId ? 'paper' : 'direct'; let sourceQuestions = []; let paper = null; if (sourceType === 'paper') { paper = assessmentPaperAccess(user, Number(body.paperId)); if (!paper || paper.status !== 'published') { bad(res, 400, '请选择已发布题单'); return; } sourceQuestions = db.prepare('SELECT * FROM assessment_paper_items WHERE paper_id=? ORDER BY sort_order').all(paper.id).map(item => ({ ...parseJson(item.snapshot_json), id: item.question_id, version: item.question_version, score: Number(item.score) })); } else { const ids = [...new Set((Array.isArray(body.questionIds) ? body.questionIds : []).map(Number).filter(Number.isSafeInteger))]; if (!ids.length || ids.length > 50) { bad(res, 400, '请选择 1 至 50 道已发布题目'); return; } const rows = ids.map(id => assessmentQuestionAccess(user, id)).filter(row => row && row.status === 'published'); if (rows.length !== ids.length || new Set(rows.map(row => row.subject)).size !== 1) { bad(res, 400, '评测题目必须属于同一科目'); return; } sourceQuestions = rows.map(row => ({ ...assessmentSnapshot(row), id: row.id, version: row.current_version, score: Number(row.score) })); }
-      if (!studentIds.length || studentIds.some(studentId => !assessmentVisibleToParent(user, studentId))) { bad(res, 403, '请选择已绑定的学生'); return; } const subject = sourceQuestions[0]?.subject; if (!subject) { bad(res, 400, '评测题目不能为空'); return; } const title = clean(body.name || body.title || (paper?.name || '学习评测'), 160); const category = db.prepare('SELECT id,name,icon,color FROM task_categories WHERE name = ? LIMIT 1').get(subject === '英语' ? '英语角' : subject === '数学' ? '数学乐园' : '语文小屋') || db.prepare('SELECT id,name,icon,color FROM task_categories WHERE active=1 ORDER BY id LIMIT 1').get(); const timestamp = now(); const created = []; db.exec('BEGIN'); try { for (const studentId of studentIds) { const taskResult = db.prepare('INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,pet_exp_weight_snapshot,resource_id,status,created_at,task_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,\'assessment\')').run(studentId, title, category.name, category.icon, category.color, clean(body.description || body.detail || '完成这份小测验，按题目要求作答。', 1000), dueDate, Number(body.duration || paper?.duration_minutes || 0) || null, Math.max(1, Number(body.stars || 1)), 'none', body.needsReview === true || sourceQuestions.some(question => question.gradingMode === 'manual') ? 1 : 0, Math.max(0, Number(body.petExpWeight ?? 1) || 0), null, 'not_started', timestamp); const taskId = Number(taskResult.lastInsertRowid); const assignmentResult = db.prepare('INSERT INTO assessment_assignments (student_task_id,student_id,paper_id,paper_version,source_type,name,subject,description,due_date,deadline,duration_minutes,stars,pet_exp_weight,needs_review,explanation_timing,allow_retry,retry_limit,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(taskId, studentId, paper?.id || null, paper?.current_version || null, sourceType, title, subject, clean(body.description || body.detail || '', 1000), dueDate, clean(body.deadline, 30), Number(body.duration || paper?.duration_minutes || 0) || null, Math.max(1, Number(body.stars || 1)), Math.max(0, Number(body.petExpWeight ?? 1) || 0), body.needsReview === true || sourceQuestions.some(question => question.gradingMode === 'manual') ? 1 : 0, ['after_submit','after_review','never'].includes(body.explanationTiming) ? body.explanationTiming : paper?.explanation_timing || 'after_review', (body.allowRetry === true || Boolean(paper?.allow_retry)) ? 1 : 0, body.allowRetry === true ? Math.min(1, Number(body.retryLimit || 1)) : Number(paper?.retry_limit || 0), user.id, timestamp, timestamp); const assignmentId = Number(assignmentResult.lastInsertRowid); const insert = db.prepare('INSERT INTO assessment_assignment_questions (assignment_id,question_id,question_version,sort_order,score,snapshot_json) VALUES (?,?,?,?,?,?)'); sourceQuestions.forEach((question, index) => insert.run(assignmentId, question.id, question.version, index + 1, question.score, JSON.stringify(question))); created.push(assignmentId); } db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; } json(res, 201, { count: created.length, assignmentIds: created }); return;
+      if (!studentIds.length || studentIds.some(studentId => !assessmentVisibleToParent(user, studentId))) { bad(res, 403, '请选择已绑定的学生'); return; } sourceQuestions = sourceQuestions.map(question => ({ ...question, score: Number(question.score) })); const subject = sourceQuestions[0]?.subject; if (!subject) { bad(res, 400, '评测题目不能为空'); return; } const title = clean(body.name || body.title || (paper?.name || '学习评测'), 160); const category = db.prepare('SELECT id,name,icon,color FROM task_categories WHERE name = ? LIMIT 1').get(subject === '英语' ? '英语角' : subject === '数学' ? '数学乐园' : '语文小屋') || db.prepare('SELECT id,name,icon,color FROM task_categories WHERE active=1 ORDER BY id LIMIT 1').get(); const timestamp = now(); const created = []; db.exec('BEGIN'); try { for (const studentId of studentIds) { const taskResult = db.prepare('INSERT INTO tasks (student_id,title,category,icon,category_color,detail,task_date,duration_minutes,stars,feedback_type,needs_review,pet_exp_weight_snapshot,resource_id,status,created_at,task_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,\'assessment\')').run(studentId, title, category.name, category.icon, category.color, clean(body.description || body.detail || '完成这份小测验，按题目要求作答。', 1000), dueDate, Number(body.duration || paper?.duration_minutes || 0) || null, Math.max(1, Number(body.stars || 1)), 'none', body.needsReview === true || sourceQuestions.some(question => question.gradingMode === 'manual') ? 1 : 0, Math.max(0, Number(body.petExpWeight ?? 1) || 0), null, 'not_started', timestamp); const taskId = Number(taskResult.lastInsertRowid); const assignmentResult = db.prepare('INSERT INTO assessment_assignments (student_task_id,student_id,paper_id,paper_version,source_type,name,subject,description,due_date,deadline,duration_minutes,stars,pet_exp_weight,needs_review,explanation_timing,allow_retry,retry_limit,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(taskId, studentId, paper?.id || null, paper?.current_version || null, sourceType, title, subject, clean(body.description || body.detail || '', 1000), dueDate, clean(body.deadline, 30), Number(body.duration || paper?.duration_minutes || 0) || null, Math.max(1, Number(body.stars || 1)), Math.max(0, Number(body.petExpWeight ?? 1) || 0), body.needsReview === true || sourceQuestions.some(question => question.gradingMode === 'manual') ? 1 : 0, ['after_submit','after_review','never'].includes(body.explanationTiming) ? body.explanationTiming : paper?.explanation_timing || 'after_review', (body.allowRetry === true || Boolean(paper?.allow_retry)) ? 1 : 0, body.allowRetry === true ? Math.min(1, Number(body.retryLimit || 1)) : Number(paper?.retry_limit || 0), user.id, timestamp, timestamp); const assignmentId = Number(assignmentResult.lastInsertRowid); const insert = db.prepare('INSERT INTO assessment_assignment_questions (assignment_id,question_id,question_version,sort_order,score,snapshot_json) VALUES (?,?,?,?,?,?)'); sourceQuestions.forEach((question, index) => insert.run(assignmentId, question.id, question.version, index + 1, question.score, JSON.stringify(question))); created.push(assignmentId); } db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; } json(res, 201, { count: created.length, assignmentIds: created }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/parent/assessment-results') {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const students = studentListFor(user).map(student => student.id); const paging = assessmentPagination(url); if (!students.length) { json(res, 200, { results: [], summary: { total: 0, completed: 0, pending: 0 }, pagination: assessmentPaginationMeta(0, paging) }); return; } const conditions = [`assessment_assignments.student_id IN (${students.map(() => '?').join(',')})`]; const params = [...students]; const studentId = Number(url.searchParams.get('studentId')); if (Number.isSafeInteger(studentId) && studentId > 0) { conditions.push('assessment_assignments.student_id = ?'); params.push(studentId); } const subject = clean(url.searchParams.get('subject'), 12); if (subject) { conditions.push('assessment_assignments.subject = ?'); params.push(subject); } const status = clean(url.searchParams.get('status'), 20); if (status) { conditions.push('tasks.status = ?'); params.push(status); } const where = `WHERE ${conditions.join(' AND ')}`; const summary = db.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN tasks.status = 'completed' THEN 1 ELSE 0 END) AS completed, SUM(CASE WHEN tasks.status = 'pending_review' THEN 1 ELSE 0 END) AS pending FROM assessment_assignments JOIN tasks ON tasks.id = assessment_assignments.student_task_id ${where}`).get(...params); const rows = db.prepare(`SELECT assessment_assignments.*, tasks.status AS task_status, users.display_name AS student_name, users.avatar AS student_avatar FROM assessment_assignments JOIN tasks ON tasks.id = assessment_assignments.student_task_id JOIN users ON users.id = assessment_assignments.student_id ${where} ORDER BY assessment_assignments.due_date DESC, assessment_assignments.id DESC LIMIT ? OFFSET ?`).all(...params, paging.pageSize, paging.offset); const results = rows.map(row => ({ ...assessmentAssignmentJson(row), studentName: row.student_name, studentAvatar: signStoredUrl(row.student_avatar || '') })); json(res, 200, { results, summary: { total: Number(summary.total || 0), completed: Number(summary.completed || 0), pending: Number(summary.pending || 0) }, pagination: assessmentPaginationMeta(summary.total, paging) }); return;
@@ -1632,6 +1743,16 @@ const server = createServer(async (req, res) => {
       if (!row || !assessmentVisibleToParent(user, row.student_id)) { bad(res, 404, '评测不存在或无权查看'); return; }
       const student = db.prepare('SELECT display_name FROM users WHERE id=?').get(row.student_id);
       json(res, 200, { assessment: { ...assessmentAssignmentJson(row, true, true), studentName: student?.display_name || '' } }); return;
+    }
+    if (req.method === 'DELETE' && /^\/api\/parent\/assessment-results\/\d+$/.test(url.pathname)) {
+      const user = requireUser(req, res); if (!user || !requireParent(user, res)) return;
+      const id = Number(url.pathname.split('/').pop()); const row = assessmentAssignmentRow(id);
+      if (!row || !assessmentVisibleToParent(user, row.student_id)) { bad(res, 404, '评测不存在或无权撤回'); return; }
+      const attempt = db.prepare('SELECT submitted_at FROM assessment_attempts WHERE assignment_id = ? ORDER BY version DESC LIMIT 1').get(id);
+      if (!['not_started', 'in_progress'].includes(row.task_status) || attempt?.submitted_at) { bad(res, 409, '学生已提交或评测已结束，无法撤回'); return; }
+      // Deleting the assessment task cascades to its assignment, attempts, and draft answers.
+      db.prepare('DELETE FROM tasks WHERE id = ?').run(row.student_task_id);
+      json(res, 200, { withdrawn: true, id }); return;
     }
     if (req.method === 'GET' && url.pathname === '/api/parent/assessment-wrong-questions') {
       const user = requireUser(req, res); if (!user || !requireParent(user, res)) return; const students = studentListFor(user).map(student => student.id); if (!students.length) { json(res, 200, { questions: [] }); return; } const rows = db.prepare(`SELECT assessment_answers.*, assessment_assignment_questions.snapshot_json, assessment_assignments.name AS assignment_name, assessment_assignments.subject, assessment_assignments.student_id, users.display_name AS student_name FROM assessment_answers JOIN assessment_attempts ON assessment_attempts.id = assessment_answers.attempt_id JOIN assessment_assignment_questions ON assessment_assignment_questions.id = assessment_answers.assignment_question_id JOIN assessment_assignments ON assessment_assignments.id = assessment_attempts.assignment_id JOIN users ON users.id = assessment_assignments.student_id WHERE assessment_assignments.student_id IN (${students.map(() => '?').join(',')}) AND assessment_attempts.status = 'finalized' AND assessment_answers.final_score < assessment_assignment_questions.score ORDER BY assessment_attempts.updated_at DESC`).all(...students); json(res, 200, { questions: rows.map(row => ({ assignmentName: row.assignment_name, subject: row.subject, studentId: row.student_id, studentName: row.student_name, ...parseJson(row.snapshot_json), answer: parseJson(row.answer_json), score: Number(row.final_score || 0), maxScore: Number(parseJson(row.snapshot_json).score || 0) })) }); return;
@@ -1671,7 +1792,7 @@ const server = createServer(async (req, res) => {
       const currentDate = businessDate();
       const week = weekRange(currentDate);
       const filters = {
-        overdue: { sql: "task_date BETWEEN ? AND ? AND task_date < ? AND status IN ('not_started','in_progress','needs_more')", args: [week.start, week.end, currentDate] },
+        overdue: { sql: "((schedule_type = 'range' AND available_end_date BETWEEN ? AND ? AND available_end_date < ?) OR (schedule_type <> 'range' AND task_date BETWEEN ? AND ? AND task_date < ?)) AND status IN ('not_started','in_progress','needs_more')", args: [week.start, week.end, currentDate, week.start, week.end, currentDate] },
         todo: { sql: "((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date = ?)) AND status IN ('not_started','in_progress','needs_more')", args: [currentDate, currentDate, currentDate] },
         future: { sql: "((schedule_type = 'range' AND available_start_date > ?) OR (schedule_type <> 'range' AND task_date > ?)) AND status IN ('not_started','in_progress','needs_more')", args: [currentDate, currentDate] },
         pending_review: { sql: "status = 'pending_review'", args: [] },
@@ -1756,8 +1877,7 @@ const server = createServer(async (req, res) => {
       const task = db.prepare('SELECT * FROM tasks WHERE id = ? AND student_id = ? AND is_demo = 0').get(taskId, user.id);
       if (!task) { bad(res, 404, '任务不存在'); return; }
       if (['completed', 'pending_review'].includes(task.status)) { bad(res, 409, task.status === 'completed' ? '任务已完成' : '任务正在等待审核'); return; }
-      // A continuous-date task may be started ahead of its visible date range, but never after its deadline.
-      if (task.schedule_type === 'range' && businessDate() > task.available_end_date) { bad(res, 409, '该持续日期任务已超过结束日期，无法继续操作'); return; }
+      // Overdue tasks remain available for students to register a late completion.
       const body = await readBody(req, 6 * 1024 * 1024);
       const rawFeedback = typeof body.feedbackData === 'string' ? body.feedbackData : task.feedback_url || task.feedback_data;
       const feedbackName = Object.hasOwn(body, 'feedbackName') ? clean(body.feedbackName, 120) : task.feedback_name;
@@ -1781,7 +1901,6 @@ const server = createServer(async (req, res) => {
       const task = db.prepare('SELECT * FROM tasks WHERE id = ? AND student_id = ? AND is_demo = 0').get(taskId, user.id);
       if (!task) { bad(res, 404, '任务不存在'); return; }
       if (['completed', 'pending_review'].includes(task.status)) { bad(res, 409, task.status === 'completed' ? '任务已完成' : '任务正在等待审核'); return; }
-      if (task.schedule_type === 'range' && businessDate() > task.available_end_date) { bad(res, 409, '该持续日期任务已超过结束日期，无法提交'); return; }
       const body = await readBody(req, 6 * 1024 * 1024);
       const feedbackName = clean(body.feedbackName, 120);
       const feedback = await feedbackValue(body.feedbackData, task, feedbackName);
@@ -1823,9 +1942,16 @@ const server = createServer(async (req, res) => {
       }
       const studentId = Number(url.searchParams.get('studentId') || students[0]?.id);
       if (!students.some(student => student.id === studentId)) { bad(res, 403, '无权查看该学生'); return; }
-      const pending = db.prepare(`SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.student_id = ? AND tasks.status = 'pending_review' AND tasks.task_type <> 'assessment' AND tasks.is_demo = 0 ORDER BY tasks.submitted_at`).all(studentId).map(taskJson);
-      const rewardPendingCount = Number(db.prepare("SELECT COUNT(*) AS total FROM reward_applications WHERE status = 'pending' AND student_id = ?").get(studentId).total || 0);
-      const readingPendingCount = Number(db.prepare("SELECT COUNT(*) AS total FROM reading_checkins WHERE status = 'pending_review' AND student_id = ?").get(studentId).total || 0);
+      const pendingTasks = db.prepare(`SELECT tasks.*, users.display_name AS student_name, users.avatar AS student_avatar, ${taskResourceSummarySql} FROM tasks JOIN users ON users.id = tasks.student_id WHERE tasks.student_id = ? AND tasks.status = 'pending_review' AND tasks.task_type <> 'assessment' AND tasks.is_demo = 0 ORDER BY tasks.submitted_at`).all(studentId).map(taskJson);
+      const pendingRewards = db.prepare(`SELECT reward_applications.*, users.display_name AS student_name, users.avatar AS student_avatar FROM reward_applications JOIN users ON users.id = reward_applications.student_id WHERE reward_applications.student_id = ? AND reward_applications.status = 'pending' ORDER BY reward_applications.created_at DESC`).all(studentId).map(row => rewardApplicationJson(row));
+      const pendingReadings = db.prepare(`${readingCheckinSelectSql} WHERE reading_checkins.student_id = ? AND reading_checkins.status = 'pending_review' ORDER BY reading_checkins.submitted_at DESC, reading_checkins.id DESC`).all(studentId).map(row => readingCheckinJson(row));
+      const pendingAssessments = db.prepare("SELECT assessment_assignments.*, tasks.status AS task_status, users.display_name AS student_name, users.avatar AS student_avatar FROM assessment_assignments JOIN tasks ON tasks.id = assessment_assignments.student_task_id JOIN users ON users.id = assessment_assignments.student_id WHERE assessment_assignments.student_id = ? AND tasks.status = 'pending_review' ORDER BY assessment_assignments.updated_at DESC, assessment_assignments.id DESC").all(studentId).map(row => ({ ...assessmentAssignmentJson(row), studentName: row.student_name, studentAvatar: signStoredUrl(row.student_avatar || '') }));
+      const pending = [
+        ...pendingTasks.map(value => ({ type: 'task', value, submittedAt: value.submittedAt })),
+        ...pendingRewards.map(value => ({ type: 'reward', value, submittedAt: value.createdAt })),
+        ...pendingReadings.map(value => ({ type: 'reading', value, submittedAt: value.submittedAt })),
+        ...pendingAssessments.map(value => ({ type: 'assessment', value, submittedAt: value.attempt?.submittedAt || value.updatedAt }))
+      ].sort((left, right) => String(right.submittedAt || '').localeCompare(String(left.submittedAt || '')));
       const currentDate = businessDate();
       const week = weekRange(currentDate);
       const todayTasks = db.prepare("SELECT status FROM tasks WHERE student_id = ? AND task_type <> 'assessment' AND ((schedule_type = 'range' AND available_start_date <= ? AND available_end_date >= ?) OR (schedule_type <> 'range' AND task_date = ?)) AND is_demo = 0").all(studentId, currentDate, currentDate, currentDate);
@@ -1844,8 +1970,8 @@ const server = createServer(async (req, res) => {
           weekCompleted: weekTasks.filter(task => task.status === 'completed').length,
           weekTotal: weekTasks.length,
           weekOverdue: weekTasks.filter(task => task.task_date < currentDate && ['not_started', 'in_progress', 'needs_more'].includes(task.status)).length,
-          pending: pending.length + rewardPendingCount + readingPendingCount,
-          readingPending: readingPendingCount,
+          pending: pending.length,
+          readingPending: pendingReadings.length,
           todayCompleted: todayTasks.filter(task => task.status === 'completed').length,
           todayTotal: todayTasks.length,
           weekStars,
@@ -2094,7 +2220,7 @@ const server = createServer(async (req, res) => {
         GROUP BY reading_books.id, reading_books.title, reading_books.cover_url
         ORDER BY completed_at DESC, reading_books.id DESC`).all(user.id).map(book => ({ id: book.id, title: book.title, coverUrl: signStoredUrl(book.cover_url || ''), completedCount: Number(book.completed_count), completedAt: book.completed_at }));
       const checkinDates = [...new Set(monthChecks.map(check => check.checkin_date))];
-      json(res, 200, { month, calendar, today: currentDate, cards, checkinDates, summary: { readingDays, activeBookCount, awardedStars, growth: rewardBreakdown(awardedStars), completedBookCount: completedBooks.length, completedBookTimes: completedBooks.reduce((total, book) => total + book.completedCount, 0) }, achievements: { completedBooks } }); return;
+      json(res, 200, { month, calendar, today: currentDate, selectedDate: queryDate, cards, checkinDates, summary: { readingDays, activeBookCount, awardedStars, growth: rewardBreakdown(awardedStars), completedBookCount: completedBooks.length, completedBookTimes: completedBooks.reduce((total, book) => total + book.completedCount, 0) }, achievements: { completedBooks } }); return;
     }
     if (req.method === 'POST' && url.pathname === '/api/student/reading/checkins') {
       const user = requireUser(req, res); if (!user) return; if (user.role !== 'student') { bad(res, 403, '学生账号专属接口'); return; }

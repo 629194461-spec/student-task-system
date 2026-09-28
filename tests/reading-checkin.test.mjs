@@ -41,6 +41,7 @@ test('reading check-ins allow the previous three days and reject older or future
 
   const allowedDashboard = await request(`/api/student/reading?month=${today.slice(0, 7)}&date=${allowedMakeupDate}`, { cookie: studentLogin.cookie });
   assert.equal(allowedDashboard.response.status, 200);
+  assert.equal(allowedDashboard.body.selectedDate, allowedMakeupDate);
   assert.equal(allowedDashboard.body.cards[0].canCheckin, true);
   const allowedCheckin = await request('/api/student/reading/checkins', { cookie: studentLogin.cookie, method: 'POST', body: JSON.stringify({ planId, checkinDate: allowedMakeupDate, endPage: 2 }) });
   assert.equal(allowedCheckin.response.status, 201);

@@ -65,10 +65,16 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
     method: 'POST',
     body: JSON.stringify({ studentIds: [firstId], title: '到期日提醒任务', detail: '结束日未完成应显著提醒', categoryId, duration: 10, stars: 2, feedbackType: 'none', needsReview: true, scheduleType: 'range', startDate: currentDate, endDate: deadlineDate })
   });
+  const ongoingRangeStart = addDays(currentDate, -3);
+  const ongoingRangeTask = await request('/api/parent/tasks', {
+    cookie: admin,
+    method: 'POST',
+    body: JSON.stringify({ studentIds: [firstId], title: '跨天进行中任务', detail: '开始日至结束日都应有待完成标记', categoryId, duration: 10, stars: 2, feedbackType: 'none', needsReview: true, scheduleType: 'range', startDate: ongoingRangeStart, endDate: addDays(currentDate, 1) })
+  });
   const pastTask = await assign(firstId, '昨日未完成任务', addDays(currentDate, -1));
   const previousWeekTask = await assign(firstId, '上一周未完成提醒', addDays(currentDate, -7));
   const otherTask = await assign(secondId, '另一学生任务', currentDate);
-  for (const result of [draftTask, singleCharacterTask, completedTask, futureTask, farFutureTask, deadlineTask, pastTask, previousWeekTask, otherTask]) assert.equal(result.response.status, 201);
+  for (const result of [draftTask, singleCharacterTask, completedTask, futureTask, farFutureTask, deadlineTask, ongoingRangeTask, pastTask, previousWeekTask, otherTask]) assert.equal(result.response.status, 201);
   assert.equal(singleCharacterTask.body.taskIds.length, 1, 'a one-character task title is valid when the title is non-empty');
 
   const firstLogin = await login(`task_a_${suffix}`, 'Student2026A', 'student');
@@ -91,12 +97,14 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.ok(!studentWeek.body.incompleteTaskDates.includes(addDays(currentDate, 1)), 'future tasks are not overdue reminders');
   assert.equal(studentWeek.body.taskDateMarkers[currentDate], 'active', 'today\'s unfinished tasks receive a blue active marker');
   if (nextDateTasks) assert.equal(studentWeek.body.taskDateMarkers[addDays(currentDate, 1)], 'active', 'future unfinished tasks receive a blue active marker');
-  assert.equal(studentWeek.body.taskDateMarkers[deadlineDate], 'overdue', 'unfinished range tasks receive a red marker on their end date');
+  assert.equal(studentWeek.body.taskDateMarkers[deadlineDate], 'active', 'future range task end dates do not receive overdue markers');
   if (!yesterdayFallsInPreviousWeek) {
     assert.equal(studentWeek.body.taskDateMarkers[addDays(currentDate, -1)], 'overdue', 'past unfinished tasks receive a red overdue marker');
   }
   const farFutureWeek = await request(`/api/student/dashboard?date=${addDays(currentDate, 9)}`, { cookie: firstLogin.cookie });
   assert.equal(farFutureWeek.body.taskDateMarkers[addDays(currentDate, 9)], 'active', 'future unfinished tasks receive a blue active marker');
+  const ongoingRangeWeek = await request(`/api/student/dashboard?date=${ongoingRangeStart}`, { cookie: firstLogin.cookie });
+  assert.equal(ongoingRangeWeek.body.taskDateMarkers[ongoingRangeStart], 'active', 'a continuous task remains blue on elapsed dates before its future deadline');
   const parentWeek = await request(`/api/parent/tasks?date=${currentDate}&studentId=${firstId}`, { cookie: admin });
   assert.equal(Object.keys(parentWeek.body.weekTasks).length, 7);
   assert.ok(parentWeek.body.weekTasks[currentDate].some(task => task.title === '草稿任务'));
@@ -104,12 +112,39 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   if (parentNextDateTasks) assert.ok(parentNextDateTasks.some(task => task.title === '未来任务'));
   assert.ok(!parentWeek.body.incompleteTaskDates.includes(currentDate), 'parent date controls only receive overdue task markers');
   assert.equal(parentWeek.body.taskDateMarkers[currentDate], 'active', 'parent and student controls use the same marker state');
-  assert.equal(parentWeek.body.taskDateMarkers[deadlineDate], 'overdue', 'parent shows the same red end-date marker for unfinished range tasks');
+  assert.equal(parentWeek.body.taskDateMarkers[deadlineDate], 'active', 'parent leaves future range task end dates non-overdue');
   if (!yesterdayFallsInPreviousWeek) {
     assert.equal(parentWeek.body.taskDateMarkers[addDays(currentDate, -1)], 'overdue', 'parent past unfinished tasks receive the same red overdue marker');
   }
   const parentFarFutureWeek = await request(`/api/parent/tasks?date=${addDays(currentDate, 9)}&studentId=${firstId}`, { cookie: admin });
   assert.equal(parentFarFutureWeek.body.taskDateMarkers[addDays(currentDate, 9)], 'active', 'parent future unfinished tasks receive the same blue active marker');
+  const parentOngoingRangeWeek = await request(`/api/parent/tasks?date=${ongoingRangeStart}&studentId=${firstId}`, { cookie: admin });
+  assert.equal(parentOngoingRangeWeek.body.taskDateMarkers[ongoingRangeStart], 'active', 'parent also marks an active continuous task across its full date range');
+
+  const pendingFutureTask = await request(`/api/student/tasks/${farFutureTask.body.taskIds[0]}/submit`, { cookie: firstLogin.cookie, method: 'POST', body: JSON.stringify({}) });
+  assert.equal(pendingFutureTask.response.status, 200);
+  const pendingFutureWeek = await request(`/api/student/dashboard?date=${addDays(currentDate, 9)}`, { cookie: firstLogin.cookie });
+  assert.equal(pendingFutureWeek.body.taskDateMarkers[addDays(currentDate, 9)], 'pending', 'submitted tasks awaiting review receive an orange marker');
+
+  const overdueDeadlineDate = addDays(currentDate, -1);
+  const overdueDeadlineTask = await request('/api/parent/tasks', {
+    cookie: admin,
+    method: 'POST',
+    body: JSON.stringify({ studentIds: [firstId], title: '已逾期持续任务', detail: '仅结束日需要标红', categoryId, duration: 10, stars: 2, feedbackType: 'none', needsReview: true, scheduleType: 'range', startDate: addDays(currentDate, -3), endDate: overdueDeadlineDate })
+  });
+  assert.equal(overdueDeadlineTask.response.status, 201);
+  const studentOverdueDeadlineWeek = await request(`/api/student/dashboard?date=${overdueDeadlineDate}`, { cookie: firstLogin.cookie });
+  assert.equal(studentOverdueDeadlineWeek.body.taskDateMarkers[overdueDeadlineDate], 'overdue', 'only a past range-task end date receives a red marker');
+  assert.equal(studentOverdueDeadlineWeek.body.taskDateMarkers[addDays(overdueDeadlineDate, -1)], 'active', 'earlier dates in an overdue range retain their blue task marker');
+  const parentOverdueDeadlineWeek = await request(`/api/parent/tasks?date=${overdueDeadlineDate}&studentId=${firstId}`, { cookie: admin });
+  assert.equal(parentOverdueDeadlineWeek.body.taskDateMarkers[overdueDeadlineDate], 'overdue', 'parent uses the same past range-task deadline marker');
+  assert.equal(parentOverdueDeadlineWeek.body.taskDateMarkers[addDays(overdueDeadlineDate, -1)], 'active', 'parent retains continuous-task markers before the overdue deadline');
+  const overdueRangeId = overdueDeadlineTask.body.taskIds[0];
+  const overdueRangeDraft = await request(`/api/student/tasks/${overdueRangeId}/draft`, { cookie: firstLogin.cookie, method: 'PATCH', body: JSON.stringify({ feedbackNote: '已补交登记' }) });
+  assert.equal(overdueRangeDraft.response.status, 200, 'an expired range task can still be opened for a late completion');
+  const overdueRangeSubmit = await request(`/api/student/tasks/${overdueRangeId}/submit`, { cookie: firstLogin.cookie, method: 'POST', body: JSON.stringify({ feedbackNote: '已补交完成' }) });
+  assert.equal(overdueRangeSubmit.response.status, 200, 'an expired range task can be submitted as a late completion');
+  assert.equal(overdueRangeSubmit.body.task.status, 'pending_review');
 
   const draftId = draftTask.body.taskIds[0];
   const studentDetailBeforeStart = await request(`/api/student/tasks/${draftId}`, { cookie: firstLogin.cookie });
@@ -196,11 +231,11 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
 
   const firstDashboard = await request(`/api/parent/dashboard?studentId=${firstId}`, { cookie: admin });
   const secondDashboard = await request(`/api/parent/dashboard?studentId=${secondId}`, { cookie: admin });
-  assert.equal(firstDashboard.body.summary.pending, 2);
-  assert.ok(firstDashboard.body.pending.every(task => task.studentId === firstId));
-  assert.equal(firstDashboard.body.pending.find(task => task.id === draftId).resourceName, parentFile.name);
+  assert.equal(firstDashboard.body.summary.pending, 4, 'includes late range submissions alongside other pending work');
+  assert.ok(firstDashboard.body.pending.every(item => item.value.studentId === firstId));
+  assert.equal(firstDashboard.body.pending.find(item => item.type === 'task' && item.value.id === draftId).value.resourceName, parentFile.name);
   assert.equal(secondDashboard.body.summary.pending, 1);
-  assert.ok(secondDashboard.body.pending.every(task => task.studentId === secondId));
+  assert.ok(secondDashboard.body.pending.every(item => item.value.studentId === secondId));
   const reviewList = await request('/api/parent/reviews?studentId=all&period=all', { cookie: admin });
   const draftReview = reviewList.body.reviews.find(task => task.id === draftId);
   assert.equal(draftReview.resourceName, parentFile.name);
