@@ -1204,10 +1204,15 @@ function assessmentImportPayload(row) {
   const options = String(row['选项（用｜分隔）'] || '').split('｜').map(value => clean(value, 300)).filter(Boolean);
   const answers = String(row['正确答案（多选用｜分隔）'] || '').split('｜').map(value => clean(value, 300)).filter(Boolean);
   const shortText = questionType === 'short_text';
+  // A single-choice option can itself represent a paired fill-in answer, such as
+  // “sells,is read”. Accept the template's delimiter between the two blanks too.
+  const pairedSingleChoice = questionType === 'single_choice' && answers.length > 1
+    ? options.find(option => option.replace(/，/g, ',').replace(/\s+/g, '') === answers.join(',').replace(/，/g, ',').replace(/\s+/g, ''))
+    : '';
   return {
     name: clean(row.题目名称, 160), subject: clean(row.科目, 12), questionType,
     promptText: clean(row.题干内容, 3000), options: questionType === 'true_false' ? ['正确', '错误'] : options,
-    correctAnswer: questionType === 'multiple_choice' ? answers : (answers[0] || (shortText ? clean(row['参考答案/评分要点'], 2000) : '')),
+    correctAnswer: questionType === 'multiple_choice' ? answers : (pairedSingleChoice || answers[0] || (shortText ? clean(row['参考答案/评分要点'], 2000) : '')),
     explanation: clean(row.答案解析, 2000), score: Number(row.分值),
     allowAttachment: ['是', 'yes', 'true', '1'].includes(String(row['允许学生上传附件（是/否）'] || '').trim().toLowerCase()),
     status: ['启用', '已发布', 'published'].includes(String(row['发布状态（草稿/启用）'] || '').trim()) ? 'published' : 'draft',
