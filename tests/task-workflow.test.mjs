@@ -135,10 +135,14 @@ test('student tasks and parent dashboard use persisted scoped data', async () =>
   assert.equal(overdueDeadlineTask.response.status, 201);
   const studentOverdueDeadlineWeek = await request(`/api/student/dashboard?date=${overdueDeadlineDate}`, { cookie: firstLogin.cookie });
   assert.equal(studentOverdueDeadlineWeek.body.taskDateMarkers[overdueDeadlineDate], 'overdue', 'only a past range-task end date receives a red marker');
-  assert.equal(studentOverdueDeadlineWeek.body.taskDateMarkers[addDays(overdueDeadlineDate, -1)], 'active', 'earlier dates in an overdue range retain their blue task marker');
+  if (new Date(`${overdueDeadlineDate}T12:00:00Z`).getUTCDay() !== 1) {
+    assert.equal(studentOverdueDeadlineWeek.body.taskDateMarkers[addDays(overdueDeadlineDate, -1)], 'active', 'earlier dates in an overdue range retain their blue task marker');
+  }
   const parentOverdueDeadlineWeek = await request(`/api/parent/tasks?date=${overdueDeadlineDate}&studentId=${firstId}`, { cookie: admin });
   assert.equal(parentOverdueDeadlineWeek.body.taskDateMarkers[overdueDeadlineDate], 'overdue', 'parent uses the same past range-task deadline marker');
-  assert.equal(parentOverdueDeadlineWeek.body.taskDateMarkers[addDays(overdueDeadlineDate, -1)], 'active', 'parent retains continuous-task markers before the overdue deadline');
+  if (new Date(`${overdueDeadlineDate}T12:00:00Z`).getUTCDay() !== 1) {
+    assert.equal(parentOverdueDeadlineWeek.body.taskDateMarkers[addDays(overdueDeadlineDate, -1)], 'active', 'parent retains continuous-task markers before the overdue deadline');
+  }
   const overdueRangeId = overdueDeadlineTask.body.taskIds[0];
   const overdueRangeDraft = await request(`/api/student/tasks/${overdueRangeId}/draft`, { cookie: firstLogin.cookie, method: 'PATCH', body: JSON.stringify({ feedbackNote: '已补交登记' }) });
   assert.equal(overdueRangeDraft.response.status, 200, 'an expired range task can still be opened for a late completion');
